@@ -1,0 +1,105 @@
+const { spawn } = require("node:child_process");
+
+const CODEX_EXE = process.env.ACCIO_CODEX_EXE || "codex";
+const CODEX_CWD = process.env.ACCIO_CODEX_CWD || process.cwd();
+
+class Client {
+  constructor() {
+    this.nextId = 1;
+    this.pending = new Map();
+    this.buffer = "";
+  }
+
+  async run() {
+    this.child = spawn(CODEX_EXE, ["app-server"], {
+      cwd: CODEX_CWD,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    this.child.stdout.on("data", (chunk) => this.onData(chunk));
+    this.child.on("error", (error) => this.fail(error));
+    this.child.on("exit", (code, signal) => this.fail(new Error(`Codex App Server exited (${code ?? signal})`)));
+    await this.request("initialize", {
+      clientInfo: { name: "accio-model-api-auth-status", title: "Accio Codex Status", version: "0.2.0" },
+      capabilities: { experimentalApi: true },
+    });
+    this.send({ method: "initialized", params: {} });
+    const account = await this.request("account/read", { refreshToken: false });
+    const models = await this.request("model/list", { limit: 100, includeHidden: false });
+    return {
+      authenticated: account?.account?.type === "chatgpt",
+      accountType: account?.account?.type || null,
+      planType: account?.account?.type === "chatgpt" ? account.account.planType : null,
+      requiresOpenaiAuth: Boolean(account?.requiresOpenaiAuth),
+      models: (Array.isArray(models?.data) ? models.data : []).map((item) => ({
+        id: item.id || item.model || item.slug || "",
+        displayName: item.displayName || item.name || item.id || item.model || item.slug || "",
+        isDefault: Boolean(item.isDefault || item.default),
+      })).filter((item) => item.id),
+    };
+  }
+
+  onData(chunk) {
+    this.buffer += chunk.toString("utf8");
+    const lines = this.buffer.split(/\r?\n/);
+    this.buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!Object.prototype.hasOwnProperty.call(message, "id") || message.method) continue;
+      const pending = this.pending.get(String(message.id));
+      if (!pending) continue;
+      this.pending.delete(String(message.id));
+      clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+      else pending.resolve(message.result);
+    }
+  }
+
+  send(message) {
+    if (!this.child?.stdin?.writable) throw new Error("Codex App Server is not writable");
+    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  request(method, params) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(String(id));
+        reject(new Error(`${method} timed out`));
+      }, 30000);
+      this.pending.set(String(id), { resolve, reject, timer });
+      this.send({ id, method, params });
+    });
+  }
+
+  fail(error) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  stop() {
+    if (this.child && !this.child.killed) this.child.kill();
+  }
+}
+
+(async () => {
+  const client = new Client();
+  try {
+    const status = await client.run();
+    process.stdout.write(`${JSON.stringify(status)}\n`);
+  } catch (error) {
+    process.stderr.write(`${error?.message || String(error)}\n`);
+    process.exitCode = 1;
+  } finally {
+    client.stop();
+  }
+})();
