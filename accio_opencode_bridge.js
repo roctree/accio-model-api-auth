@@ -4,6 +4,7 @@ const HOST = "127.0.0.1";
 const PORT = Number(process.env.ACCIO_OPENCODE_PORT || 18765);
 const MODEL = process.env.OPENCODE_GO_MODEL || "deepseek-v4-flash";
 const ENDPOINT = process.env.OPENCODE_GO_ENDPOINT || "https://opencode.ai/zen/go/v1/chat/completions";
+const AUTH_TYPE = process.env.ACCIO_MODEL_AUTH_TYPE || "api_key";
 const ORIGINAL_GATEWAY = (process.env.ACCIO_ORIGINAL_GATEWAY_URL || "https://phoenix-gw.alibaba.com").replace(/\/+$/, "");
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
@@ -235,20 +236,25 @@ function usageMetadata(usage) {
 
 async function proxy(request, response, payload) {
   const apiKey = process.env.OPENCODE_GO_API_KEY;
-  if (!apiKey) {
+  if (AUTH_TYPE === "api_key" && !apiKey) {
     errorFrame(response, "CONFIG", "OPENCODE_GO_API_KEY is not set");
     return;
   }
+  if (AUTH_TYPE !== "api_key" && AUTH_TYPE !== "none") {
+    errorFrame(response, "CONFIG", `Unsupported authentication type: ${AUTH_TYPE}`);
+    return;
+  }
   const upstreamRequest = toOpenAiRequest(payload);
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
+  if (AUTH_TYPE === "api_key") headers.Authorization = `Bearer ${apiKey}`;
   let upstream;
   try {
     upstream = await fetch(ENDPOINT, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
+      headers,
       body: JSON.stringify(upstreamRequest),
       signal: request.signal,
     });
@@ -267,7 +273,7 @@ async function proxy(request, response, payload) {
     return;
   }
   if (!upstream.body) {
-    errorFrame(response, "UPSTREAM_EMPTY", "OpenCode Go returned an empty response body");
+    errorFrame(response, "UPSTREAM_EMPTY", "Model API returned an empty response body");
     return;
   }
 
@@ -386,7 +392,7 @@ async function forwardGateway(request, response) {
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/healthz") {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ ok: true, model: MODEL, endpoint: ENDPOINT, apiKeyConfigured: Boolean(process.env.OPENCODE_GO_API_KEY) }));
+    response.end(JSON.stringify({ ok: true, model: MODEL, endpoint: ENDPOINT, authType: AUTH_TYPE, apiKeyConfigured: Boolean(process.env.OPENCODE_GO_API_KEY) }));
     return;
   }
   if (request.url?.startsWith("/api/adk/llm/generateContent") && request.method === "POST") {
@@ -414,8 +420,9 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Accio OpenCode bridge listening on http://${HOST}:${PORT}`);
+  console.log(`Accio model bridge listening on http://${HOST}:${PORT}`);
   console.log(`model=${MODEL}`);
+  console.log(`authType=${AUTH_TYPE}`);
   console.log(`originalGateway=${ORIGINAL_GATEWAY}`);
   console.log(`apiKeyConfigured=${Boolean(process.env.OPENCODE_GO_API_KEY)}`);
 });

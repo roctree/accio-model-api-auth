@@ -1,6 +1,7 @@
 param(
     [switch]$StoreCredential,
-    [switch]$BackendOnly
+    [switch]$BackendOnly,
+    [switch]$RestartBridge
 )
 
 Set-StrictMode -Version Latest
@@ -12,11 +13,21 @@ $relayUrl = "http://127.0.0.1:18767"
 $bridgeUrl = "http://127.0.0.1:18765"
 $model = "deepseek-v4-flash"
 $endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
+$authType = "api_key"
+$configDirectory = Join-Path $env:LOCALAPPDATA "AccioModelApiAuth"
+$configPath = Join-Path $configDirectory "config.json"
 $nodeExe = "C:\Program Files\nodejs\node.exe"
 $accioExe = Join-Path $env:LOCALAPPDATA "Programs\Accio\Accio.exe"
 $bridgeScript = Join-Path $PSScriptRoot "accio_opencode_bridge.js"
 $relayScript = Join-Path $PSScriptRoot "accio_gateway_relay.js"
 $relayLog = Join-Path $PSScriptRoot "accio_gateway_relay.log"
+
+if (Test-Path -LiteralPath $configPath) {
+    $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+    $model = [string]$config.model
+    $endpoint = [string]$config.endpoint
+    $authType = [string]$config.authType
+}
 
 if (-not ("AccioOpenCode.NativeCredential" -as [type])) {
     Add-Type -TypeDefinition @'
@@ -109,7 +120,7 @@ if ($StoreCredential) {
         $plainKey = $null
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPointer)
     }
-    Write-Output "OpenCode Go credential stored in Windows Credential Manager."
+    Write-Output "Model API credential stored in Windows Credential Manager."
     return
 }
 
@@ -134,26 +145,71 @@ function Get-Health([string]$url) {
     }
 }
 
-$bridgeHealth = Get-Health "$bridgeUrl/healthz"
-if ($null -eq $bridgeHealth) {
-    $apiKey = [AccioOpenCode.NativeCredential]::Read($credentialTarget)
-    if ([string]::IsNullOrWhiteSpace($apiKey)) {
-        throw "OpenCode Go credential is empty"
+function Stop-BridgeProcess {
+    $connection = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 18765 -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $connection) {
+        return
     }
-    $env:OPENCODE_GO_API_KEY = $apiKey
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($connection.OwningProcess)"
+    if ($null -eq $process -or [string]::IsNullOrWhiteSpace($process.CommandLine) -or
+        $process.CommandLine.IndexOf($bridgeScript, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "Port 18765 is owned by an unexpected process"
+    }
+    Stop-Process -Id $connection.OwningProcess -Force
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        Start-Sleep -Milliseconds 100
+        if ($null -eq (Get-Health "$bridgeUrl/healthz")) {
+            return
+        }
+    }
+    throw "Accio model bridge did not stop"
+}
+
+$bridgeHealth = Get-Health "$bridgeUrl/healthz"
+$bridgeAuthType = ""
+if ($null -ne $bridgeHealth -and $null -ne $bridgeHealth.PSObject.Properties["authType"]) {
+    $bridgeAuthType = [string]$bridgeHealth.authType
+}
+$bridgeConfigurationChanged = $null -ne $bridgeHealth -and (
+    $bridgeHealth.model -ne $model -or
+    $bridgeHealth.endpoint -ne $endpoint -or
+    $bridgeAuthType -ne $authType
+)
+if ($null -ne $bridgeHealth -and ($RestartBridge -or $bridgeConfigurationChanged)) {
+    Stop-BridgeProcess
+    $bridgeHealth = $null
+}
+if ($null -eq $bridgeHealth) {
+    if ($authType -eq "api_key") {
+        $apiKey = [AccioOpenCode.NativeCredential]::Read($credentialTarget)
+        if ([string]::IsNullOrWhiteSpace($apiKey)) {
+            throw "Model API credential is empty"
+        }
+        $env:OPENCODE_GO_API_KEY = $apiKey
+    } elseif ($authType -eq "none") {
+        Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
+    } else {
+        throw "Unsupported authentication type: $authType"
+    }
     $env:OPENCODE_GO_MODEL = $model
     $env:OPENCODE_GO_ENDPOINT = $endpoint
-    Start-Process -FilePath $nodeExe -ArgumentList $bridgeScript -WindowStyle Hidden
-    Remove-Item Env:OPENCODE_GO_API_KEY
-    $apiKey = $null
+    $env:ACCIO_MODEL_AUTH_TYPE = $authType
+    Start-Process -FilePath $nodeExe -ArgumentList "`"$bridgeScript`"" -WindowStyle Hidden
+    if ($authType -eq "api_key") {
+        Remove-Item Env:OPENCODE_GO_API_KEY
+        $apiKey = $null
+    }
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
         $bridgeHealth = Get-Health "$bridgeUrl/healthz"
         if ($null -ne $bridgeHealth) { break }
     }
 }
-if ($null -eq $bridgeHealth -or $bridgeHealth.model -ne $model -or $bridgeHealth.endpoint -ne $endpoint -or -not $bridgeHealth.apiKeyConfigured) {
-    throw "OpenCode Go bridge health check failed"
+$credentialReady = $null -ne $bridgeHealth -and ($authType -eq "none" -or $bridgeHealth.apiKeyConfigured)
+if ($null -eq $bridgeHealth -or $bridgeHealth.model -ne $model -or $bridgeHealth.endpoint -ne $endpoint -or
+    $bridgeHealth.authType -ne $authType -or -not $credentialReady) {
+    throw "Accio model bridge health check failed"
 }
 
 $relayHealth = Get-Health "$relayUrl/healthz"
@@ -161,7 +217,7 @@ if ($null -eq $relayHealth) {
     $env:ACCIO_RELAY_PORT = "18767"
     $env:ACCIO_RELAY_LOG = $relayLog
     $env:ACCIO_LOCAL_GATEWAY_PASSWORD = $localGatewayPassword
-    Start-Process -FilePath $nodeExe -ArgumentList $relayScript -WindowStyle Hidden
+    Start-Process -FilePath $nodeExe -ArgumentList "`"$relayScript`"" -WindowStyle Hidden
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
         $relayHealth = Get-Health "$relayUrl/healthz"
@@ -179,4 +235,4 @@ if (-not $BackendOnly -and -not (Get-Process -Name "Accio" -ErrorAction Silently
     Start-Process -FilePath $accioExe
 }
 
-Write-Output "Accio OpenCode Go backend is ready."
+Write-Output "Accio model API backend is ready."
