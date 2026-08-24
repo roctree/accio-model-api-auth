@@ -18,7 +18,8 @@ $configDirectory = Join-Path $env:LOCALAPPDATA "AccioModelApiAuth"
 $configPath = Join-Path $configDirectory "config.json"
 $nodeExe = "C:\Program Files\nodejs\node.exe"
 $accioExe = Join-Path $env:LOCALAPPDATA "Programs\Accio\Accio.exe"
-$bridgeScript = Join-Path $PSScriptRoot "accio_opencode_bridge.js"
+$openAiBridgeScript = Join-Path $PSScriptRoot "accio_opencode_bridge.js"
+$codexBridgeScript = Join-Path $PSScriptRoot "accio_codex_bridge.js"
 $relayScript = Join-Path $PSScriptRoot "accio_gateway_relay.js"
 $relayLog = Join-Path $PSScriptRoot "accio_gateway_relay.log"
 
@@ -27,6 +28,16 @@ if (Test-Path -LiteralPath $configPath) {
     $model = [string]$config.model
     $endpoint = [string]$config.endpoint
     $authType = [string]$config.authType
+}
+if ($authType -eq "codex_chatgpt") {
+    $endpoint = "codex-app-server://local"
+    $bridgeScript = $codexBridgeScript
+} else {
+    $bridgeScript = $openAiBridgeScript
+}
+
+if (-not (Test-Path -LiteralPath $nodeExe)) {
+    throw "Node.js was not found at $nodeExe"
 }
 
 if (-not ("AccioOpenCode.NativeCredential" -as [type])) {
@@ -145,6 +156,33 @@ function Get-Health([string]$url) {
     }
 }
 
+function Get-CodexExecutable {
+    $binRoot = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin"
+    if (Test-Path -LiteralPath $binRoot) {
+        $candidate = Get-ChildItem -LiteralPath $binRoot -Directory |
+            Sort-Object LastWriteTime -Descending |
+            ForEach-Object {
+                $codexPath = Join-Path $_.FullName "codex.exe"
+                $hostPath = Join-Path $_.FullName "codex-code-mode-host.exe"
+                if ((Test-Path -LiteralPath $codexPath) -and (Test-Path -LiteralPath $hostPath)) {
+                    $codexPath
+                }
+            } |
+            Select-Object -First 1
+        if ($candidate) {
+            return $candidate
+        }
+    }
+    $command = Get-Command codex -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) {
+        $hostPath = Join-Path (Split-Path -Parent $command.Source) "codex-code-mode-host.exe"
+        if (Test-Path -LiteralPath $hostPath) {
+            return $command.Source
+        }
+    }
+    throw "A complete Codex installation with codex-code-mode-host.exe was not found"
+}
+
 function Stop-BridgeProcess {
     $connection = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 18765 -State Listen -ErrorAction SilentlyContinue |
         Select-Object -First 1
@@ -152,8 +190,16 @@ function Stop-BridgeProcess {
         return
     }
     $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($connection.OwningProcess)"
-    if ($null -eq $process -or [string]::IsNullOrWhiteSpace($process.CommandLine) -or
-        $process.CommandLine.IndexOf($bridgeScript, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    $knownBridge = $false
+    if ($null -ne $process -and -not [string]::IsNullOrWhiteSpace($process.CommandLine)) {
+        foreach ($knownScript in @($openAiBridgeScript, $codexBridgeScript)) {
+            if ($process.CommandLine.IndexOf($knownScript, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $knownBridge = $true
+                break
+            }
+        }
+    }
+    if (-not $knownBridge) {
         throw "Port 18765 is owned by an unexpected process"
     }
     Stop-Process -Id $connection.OwningProcess -Force
@@ -187,18 +233,31 @@ if ($null -eq $bridgeHealth) {
             throw "Model API credential is empty"
         }
         $env:OPENCODE_GO_API_KEY = $apiKey
+        $env:OPENCODE_GO_MODEL = $model
+        $env:OPENCODE_GO_ENDPOINT = $endpoint
+        $env:ACCIO_MODEL_AUTH_TYPE = $authType
     } elseif ($authType -eq "none") {
         Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
+        $env:OPENCODE_GO_MODEL = $model
+        $env:OPENCODE_GO_ENDPOINT = $endpoint
+        $env:ACCIO_MODEL_AUTH_TYPE = $authType
+    } elseif ($authType -eq "codex_chatgpt") {
+        Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
+        $env:ACCIO_CODEX_EXE = Get-CodexExecutable
+        $env:ACCIO_CODEX_MODEL = $model
+        $env:ACCIO_CODEX_CWD = $PSScriptRoot
     } else {
         throw "Unsupported authentication type: $authType"
     }
-    $env:OPENCODE_GO_MODEL = $model
-    $env:OPENCODE_GO_ENDPOINT = $endpoint
-    $env:ACCIO_MODEL_AUTH_TYPE = $authType
     Start-Process -FilePath $nodeExe -ArgumentList "`"$bridgeScript`"" -WindowStyle Hidden
     if ($authType -eq "api_key") {
         Remove-Item Env:OPENCODE_GO_API_KEY
         $apiKey = $null
+    }
+    if ($authType -eq "codex_chatgpt") {
+        Remove-Item Env:ACCIO_CODEX_EXE
+        Remove-Item Env:ACCIO_CODEX_MODEL
+        Remove-Item Env:ACCIO_CODEX_CWD
     }
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
@@ -206,9 +265,19 @@ if ($null -eq $bridgeHealth) {
         if ($null -ne $bridgeHealth) { break }
     }
 }
-$credentialReady = $null -ne $bridgeHealth -and ($authType -eq "none" -or $bridgeHealth.apiKeyConfigured)
+
+$authenticationReady = $false
+if ($null -ne $bridgeHealth) {
+    if ($authType -eq "api_key") {
+        $authenticationReady = $null -ne $bridgeHealth.PSObject.Properties["apiKeyConfigured"] -and [bool]$bridgeHealth.apiKeyConfigured
+    } elseif ($authType -eq "none") {
+        $authenticationReady = $true
+    } elseif ($authType -eq "codex_chatgpt") {
+        $authenticationReady = $null -ne $bridgeHealth.PSObject.Properties["authenticated"] -and [bool]$bridgeHealth.authenticated
+    }
+}
 if ($null -eq $bridgeHealth -or $bridgeHealth.model -ne $model -or $bridgeHealth.endpoint -ne $endpoint -or
-    $bridgeHealth.authType -ne $authType -or -not $credentialReady) {
+    $bridgeHealth.authType -ne $authType -or -not $authenticationReady) {
     throw "Accio model bridge health check failed"
 }
 
@@ -235,4 +304,4 @@ if (-not $BackendOnly -and -not (Get-Process -Name "Accio" -ErrorAction Silently
     Start-Process -FilePath $accioExe
 }
 
-Write-Output "Accio model API backend is ready."
+Write-Output "Accio model API backend is ready: $authType / $model"
