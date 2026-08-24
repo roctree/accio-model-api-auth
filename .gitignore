@@ -1,0 +1,10 @@
+*.log
+*.pid
+*.tmp
+.env
+.env.*
+auth.json
+credentials.json
+*.key
+*.pem
+shortcuts-backup/
