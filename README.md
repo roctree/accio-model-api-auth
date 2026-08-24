@@ -27,6 +27,25 @@ Accio Desktop
 
 环境要求：Windows、Node.js、已安装的 Accio Desktop。
 
+### 可视化配置
+
+双击 `open_config_ui.cmd`，或者运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\accio_config_ui.ps1
+```
+
+界面可以配置：
+
+- OpenAI-compatible API 地址。
+- 模型名称，默认仍为 `deepseek-v4-flash`。
+- API Key 认证，Key 保存到 Windows 凭据管理器。
+- 无认证模式，用于本机 Ollama、vLLM 等兼容服务。
+
+非敏感配置保存在 `%LOCALAPPDATA%\AccioModelApiAuth\config.json`。点击“保存并启动 Accio”后，程序只重启本地模型桥并应用新配置；Accio 原网关路由保持不变。
+
+### 命令行
+
 首次使用时保存 OpenCode Go API Key：
 
 ```powershell
@@ -54,4 +73,4 @@ powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -BackendO
 
 ## 后续方向
 
-计划增加可视化配置界面，在不修改源码的情况下选择模型服务、API 地址、模型名称和认证方式。
+Codex 的 ChatGPT 登录不是 API Key。该认证方式需要通过 Codex App Server 适配，并将 Accio 工具映射为动态工具；不会通过读取或复制 OAuth Token 实现。
