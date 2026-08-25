@@ -17,6 +17,8 @@ $defaultCodexModel = "gpt-5.6-sol"
 $lastApiEndpoint = $defaultEndpoint
 $lastApiModel = $defaultModel
 $lastCodexModel = $defaultCodexModel
+$lastCodexReasoningEffort = ""
+$codexModelsById = @{}
 $previousAuthIndex = -1
 
 if (-not ("AccioModelApiAuth.NativeCredential" -as [type])) {
@@ -193,16 +195,28 @@ $form.Controls.Add($modelLabel)
 
 $modelComboBox = New-Object System.Windows.Forms.ComboBox
 $modelComboBox.Location = New-Object System.Drawing.Point(30, 270)
-$modelComboBox.Size = New-Object System.Drawing.Size(380, 28)
+$modelComboBox.Size = New-Object System.Drawing.Size(255, 28)
 $modelComboBox.DropDownStyle = "DropDown"
 $modelComboBox.AutoCompleteMode = "SuggestAppend"
 $modelComboBox.AutoCompleteSource = "ListItems"
 $form.Controls.Add($modelComboBox)
 
+$reasoningEffortLabel = New-Object System.Windows.Forms.Label
+$reasoningEffortLabel.Text = "思考强度"
+$reasoningEffortLabel.Location = New-Object System.Drawing.Point(300, 245)
+$reasoningEffortLabel.Size = New-Object System.Drawing.Size(120, 22)
+$form.Controls.Add($reasoningEffortLabel)
+
+$reasoningEffortComboBox = New-Object System.Windows.Forms.ComboBox
+$reasoningEffortComboBox.Location = New-Object System.Drawing.Point(300, 270)
+$reasoningEffortComboBox.Size = New-Object System.Drawing.Size(120, 28)
+$reasoningEffortComboBox.DropDownStyle = "DropDownList"
+$form.Controls.Add($reasoningEffortComboBox)
+
 $codexRefreshButton = New-Object System.Windows.Forms.Button
 $codexRefreshButton.Text = "刷新 Codex 登录和模型"
-$codexRefreshButton.Location = New-Object System.Drawing.Point(424, 269)
-$codexRefreshButton.Size = New-Object System.Drawing.Size(206, 30)
+$codexRefreshButton.Location = New-Object System.Drawing.Point(434, 269)
+$codexRefreshButton.Size = New-Object System.Drawing.Size(196, 30)
 $form.Controls.Add($codexRefreshButton)
 
 $apiKeyLabel = New-Object System.Windows.Forms.Label
@@ -269,6 +283,42 @@ function Get-SelectedAuthType {
     return "api_key"
 }
 
+function Update-ReasoningEfforts([string]$preferredEffort = "") {
+    $modelId = $modelComboBox.Text
+    if ([string]::IsNullOrWhiteSpace($preferredEffort)) {
+        $preferredEffort = $reasoningEffortComboBox.Text
+    }
+    if ([string]::IsNullOrWhiteSpace($preferredEffort)) {
+        $preferredEffort = $script:lastCodexReasoningEffort
+    }
+
+    $reasoningEffortComboBox.BeginUpdate()
+    try {
+        $reasoningEffortComboBox.Items.Clear()
+        if ($script:codexModelsById.ContainsKey($modelId)) {
+            $modelInfo = $script:codexModelsById[$modelId]
+            foreach ($effort in @($modelInfo.supportedReasoningEfforts)) {
+                [void]$reasoningEffortComboBox.Items.Add([string]$effort)
+            }
+            if ($reasoningEffortComboBox.Items.Contains($preferredEffort)) {
+                $reasoningEffortComboBox.SelectedItem = $preferredEffort
+            } elseif ($reasoningEffortComboBox.Items.Contains([string]$modelInfo.defaultReasoningEffort)) {
+                $reasoningEffortComboBox.SelectedItem = [string]$modelInfo.defaultReasoningEffort
+            } elseif ($reasoningEffortComboBox.Items.Count -gt 0) {
+                $reasoningEffortComboBox.SelectedIndex = 0
+            }
+        } elseif (-not [string]::IsNullOrWhiteSpace($preferredEffort)) {
+            [void]$reasoningEffortComboBox.Items.Add($preferredEffort)
+            $reasoningEffortComboBox.SelectedItem = $preferredEffort
+        }
+    } finally {
+        $reasoningEffortComboBox.EndUpdate()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($reasoningEffortComboBox.Text)) {
+        $script:lastCodexReasoningEffort = $reasoningEffortComboBox.Text
+    }
+}
+
 function Update-ModeControls {
     $usesCodex = $authComboBox.SelectedIndex -eq 2
     $usesApiKey = $authComboBox.SelectedIndex -eq 0
@@ -279,8 +329,10 @@ function Update-ModeControls {
         }
         $endpointTextBox.Text = $codexEndpoint
         $modelComboBox.Text = $script:lastCodexModel
+        Update-ReasoningEfforts $script:lastCodexReasoningEffort
     } elseif ($script:previousAuthIndex -eq 2) {
         $script:lastCodexModel = $modelComboBox.Text
+        $script:lastCodexReasoningEffort = $reasoningEffortComboBox.Text
         $endpointTextBox.Text = $script:lastApiEndpoint
         $modelComboBox.Text = $script:lastApiModel
     }
@@ -289,6 +341,8 @@ function Update-ModeControls {
     $apiKeyTextBox.Enabled = $usesApiKey
     $apiKeyLabel.Enabled = $usesApiKey
     $apiKeyHintLabel.Enabled = $usesApiKey
+    $reasoningEffortLabel.Enabled = $usesCodex
+    $reasoningEffortComboBox.Enabled = $usesCodex
     $codexRefreshButton.Enabled = $usesCodex
     $codexLoginButton.Enabled = $usesCodex
     $script:previousAuthIndex = $authComboBox.SelectedIndex
@@ -302,10 +356,13 @@ function Refresh-CodexStatus {
     try {
         $status = Get-CodexStatus
         $selectedModel = $modelComboBox.Text
+        $selectedReasoningEffort = $reasoningEffortComboBox.Text
+        $script:codexModelsById.Clear()
         $modelComboBox.BeginUpdate()
         $modelComboBox.Items.Clear()
         foreach ($item in $status.models) {
             [void]$modelComboBox.Items.Add([string]$item.id)
+            $script:codexModelsById[[string]$item.id] = $item
         }
         $modelComboBox.EndUpdate()
         if (-not [string]::IsNullOrWhiteSpace($selectedModel) -and $modelComboBox.Items.Contains($selectedModel)) {
@@ -318,6 +375,7 @@ function Refresh-CodexStatus {
                 $modelComboBox.SelectedIndex = 0
             }
         }
+        Update-ReasoningEfforts $selectedReasoningEffort
         if ($status.authenticated) {
             $codexStatusLabel.Text = "已登录 ChatGPT（$($status.planType)），可用模型 $($status.models.Count) 个"
             $codexStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(21, 128, 61)
@@ -350,6 +408,7 @@ function Save-Configuration {
     }
     if ($authType -eq "codex_chatgpt") {
         $script:lastCodexModel = $model
+        $script:lastCodexReasoningEffort = $reasoningEffortComboBox.Text
     } else {
         $script:lastApiEndpoint = $endpoint
         $script:lastApiModel = $model
@@ -358,10 +417,12 @@ function Save-Configuration {
     [ordered]@{
         endpoint = $endpoint
         model = $model
+        reasoningEffort = if ($authType -eq "codex_chatgpt") { $script:lastCodexReasoningEffort } else { "" }
         authType = $authType
         openAiEndpoint = $script:lastApiEndpoint
         openAiModel = $script:lastApiModel
         codexModel = $script:lastCodexModel
+        codexReasoningEffort = $script:lastCodexReasoningEffort
     } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
     if ($authType -eq "api_key" -and -not [string]::IsNullOrWhiteSpace($apiKeyTextBox.Text)) {
         [AccioModelApiAuth.NativeCredential]::Write($credentialTarget, $apiKeyTextBox.Text)
@@ -382,6 +443,12 @@ function Show-ConfigurationError([string]$message) {
 
 $authComboBox.Add_SelectedIndexChanged({
     Update-ModeControls
+})
+
+$modelComboBox.Add_SelectedIndexChanged({
+    if ($authComboBox.SelectedIndex -eq 2) {
+        Update-ReasoningEfforts
+    }
 })
 
 $codexRefreshButton.Add_Click({
@@ -446,6 +513,11 @@ if (Test-Path -LiteralPath $configPath) {
         $lastCodexModel = [string]$config.codexModel
     } elseif ([string]$config.authType -eq "codex_chatgpt") {
         $lastCodexModel = [string]$config.model
+    }
+    if ($null -ne $config.PSObject.Properties["codexReasoningEffort"]) {
+        $lastCodexReasoningEffort = [string]$config.codexReasoningEffort
+    } elseif ([string]$config.authType -eq "codex_chatgpt" -and $null -ne $config.PSObject.Properties["reasoningEffort"]) {
+        $lastCodexReasoningEffort = [string]$config.reasoningEffort
     }
     $endpointTextBox.Text = [string]$config.endpoint
     $modelComboBox.Text = [string]$config.model

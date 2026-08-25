@@ -20,7 +20,7 @@ class Client {
     this.child.on("error", (error) => this.fail(error));
     this.child.on("exit", (code, signal) => this.fail(new Error(`Codex App Server exited (${code ?? signal})`)));
     await this.request("initialize", {
-      clientInfo: { name: "accio-model-api-auth-status", title: "Accio Codex Status", version: "0.2.0" },
+      clientInfo: { name: "accio-model-api-auth-status", title: "Accio Codex Status", version: "0.3.0" },
       capabilities: { experimentalApi: true },
     });
     this.send({ method: "initialized", params: {} });
@@ -35,6 +35,10 @@ class Client {
         id: item.id || item.model || item.slug || "",
         displayName: item.displayName || item.name || item.id || item.model || item.slug || "",
         isDefault: Boolean(item.isDefault || item.default),
+        defaultReasoningEffort: item.defaultReasoningEffort || "",
+        supportedReasoningEfforts: (Array.isArray(item.supportedReasoningEfforts) ? item.supportedReasoningEfforts : [])
+          .map((effort) => typeof effort === "string" ? effort : effort?.reasoningEffort || effort?.effort || "")
+          .filter(Boolean),
       })).filter((item) => item.id),
     };
   }

@@ -5,10 +5,11 @@ const { EventEmitter } = require("node:events");
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.ACCIO_CODEX_PORT || process.env.ACCIO_OPENCODE_PORT || 18765);
 const MODEL = process.env.ACCIO_CODEX_MODEL || "gpt-5.6-sol";
+const REASONING_EFFORT = process.env.ACCIO_CODEX_REASONING_EFFORT || "";
 const CODEX_EXE = process.env.ACCIO_CODEX_EXE || "codex";
 const CODEX_CWD = process.env.ACCIO_CODEX_CWD || process.cwd();
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
-const BRIDGE_VERSION = "0.2.0";
+const BRIDGE_VERSION = "0.3.0";
 
 function valueOf(object, camel, snake) {
   return object?.[camel] ?? object?.[snake];
@@ -153,7 +154,7 @@ function endWithError(response, code, message) {
     partial: false,
     errorCode: String(code),
     errorMessage: String(message),
-    customMetadata: { model: MODEL, provider: "codex_chatgpt" },
+    customMetadata: { model: MODEL, reasoning_effort: REASONING_EFFORT || "default", provider: "codex_chatgpt" },
   });
   response.end();
 }
@@ -304,10 +305,15 @@ class CodexAppServer extends EventEmitter {
       planType: this.account?.type === "chatgpt" ? this.account.planType : null,
       requiresOpenaiAuth: this.requiresOpenaiAuth,
       model: MODEL,
+      reasoningEffort: REASONING_EFFORT || "default",
       models: this.models.map((item) => ({
         id: item.id || item.model || item.slug || "",
         displayName: item.displayName || item.name || item.id || item.model || item.slug || "",
         isDefault: Boolean(item.isDefault || item.default),
+        defaultReasoningEffort: item.defaultReasoningEffort || "",
+        supportedReasoningEfforts: (Array.isArray(item.supportedReasoningEfforts) ? item.supportedReasoningEfforts : [])
+          .map((effort) => typeof effort === "string" ? effort : effort?.reasoningEffort || effort?.effort || "")
+          .filter(Boolean),
       })).filter((item) => item.id),
     };
   }
@@ -361,7 +367,7 @@ class TurnContext {
       content: { role: "model", parts: [{ text }] },
       partial: true,
       turnComplete: false,
-      customMetadata: { model: MODEL, provider: "codex_chatgpt", thread_id: this.threadId, turn_id: this.turnId },
+      customMetadata: { model: MODEL, reasoning_effort: REASONING_EFFORT || "default", provider: "codex_chatgpt", thread_id: this.threadId, turn_id: this.turnId },
     });
   }
 
@@ -397,7 +403,7 @@ class TurnContext {
       partial: false,
       turnComplete: true,
       finishReason: "TOOL_CALLS",
-      customMetadata: { model: MODEL, provider: "codex_chatgpt", thread_id: this.threadId, turn_id: this.turnId },
+      customMetadata: { model: MODEL, reasoning_effort: REASONING_EFFORT || "default", provider: "codex_chatgpt", thread_id: this.threadId, turn_id: this.turnId },
     });
     response.end();
     this.detach();
@@ -418,7 +424,7 @@ class TurnContext {
           partial: false,
           turnComplete: true,
           finishReason: "STOP",
-          customMetadata: { model: MODEL, provider: "codex_chatgpt", thread_id: this.threadId, turn_id: this.turnId },
+          customMetadata: { model: MODEL, reasoning_effort: REASONING_EFFORT || "default", provider: "codex_chatgpt", thread_id: this.threadId, turn_id: this.turnId },
         });
         response.end();
       }
@@ -535,6 +541,7 @@ async function startTurn(response, payload) {
     const turnResult = await codex.request("turn/start", {
       threadId: context.threadId,
       input: conversationInputs(payload),
+      ...(REASONING_EFFORT ? { effort: REASONING_EFFORT } : {}),
     });
     context.turnId = turnResult?.turn?.id || "";
     await context.attachedPromise;
@@ -560,7 +567,7 @@ function jsonResponse(response, status, value) {
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/healthz") {
     if (!codex.ready) {
-      jsonResponse(response, 503, { ok: false, provider: "codex_chatgpt", model: MODEL, error: codex.startError?.message || "starting" });
+      jsonResponse(response, 503, { ok: false, provider: "codex_chatgpt", model: MODEL, reasoningEffort: REASONING_EFFORT || "default", error: codex.startError?.message || "starting" });
       return;
     }
     const status = codex.publicStatus();
@@ -570,6 +577,7 @@ const server = http.createServer(async (request, response) => {
       authType: "codex_chatgpt",
       endpoint: "codex-app-server://local",
       model: MODEL,
+      reasoningEffort: REASONING_EFFORT || "default",
       authenticated: status.authenticated,
       accountType: status.accountType,
       planType: status.planType,
@@ -588,7 +596,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/codex/models") {
     try {
       const status = await codex.refreshStatus();
-      jsonResponse(response, 200, { model: MODEL, models: status.models });
+      jsonResponse(response, 200, { model: MODEL, reasoningEffort: REASONING_EFFORT || "default", models: status.models });
     } catch (error) {
       jsonResponse(response, 503, { error: error?.message || String(error) });
     }
@@ -621,6 +629,7 @@ const server = http.createServer(async (request, response) => {
 server.listen(PORT, HOST, () => {
   console.log(`Accio Codex bridge listening on http://${HOST}:${PORT}`);
   console.log(`model=${MODEL}`);
+  console.log(`reasoningEffort=${REASONING_EFFORT || "default"}`);
 });
 
 codex.start().catch((error) => {
