@@ -13,6 +13,7 @@
 - Accio 浏览器工具调用可完成完整的调用与结果回传。
 - 可通过 Codex App Server 使用本机 ChatGPT 托管登录，不需要复制 OAuth Token。
 - Codex 模型列表和每个模型支持的思考强度从本机 App Server 动态读取，已验证文本、多轮对话和动态工具结果回传。
+- Accio 的模型选择位置会显示模型桥实际使用的模型；Codex 模式同时显示思考强度，切换配置后自动刷新。
 - OpenCode API Key 保存在 Windows 凭据管理器中，不写入源码或配置文件。
 - Accio 本地网关口令在首次启动时随机生成，并保存在 Windows 凭据管理器中。
 
@@ -24,6 +25,7 @@ Accio Desktop
      -> 模型请求：本地模型桥（127.0.0.1:18765）
         -> OpenAI-compatible API（例如 OpenCode Go）
         -> 或本机 Codex App Server（ChatGPT 托管登录）
+     -> 模型显示目录：读取本地模型桥当前状态，只改 Accio 显示名称
      -> Accio 功能请求：phoenix-gw.alibaba.com
 ```
 
@@ -50,6 +52,8 @@ powershell -ExecutionPolicy Bypass -File .\accio_config_ui.ps1
 Codex 模式下可在界面中点击“登录 Codex”，登录完成后点击“刷新 Codex 登录和模型”。选择模型后，“思考强度”只显示该模型实际支持的 `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`；切换到不支持当前强度的模型时自动使用该模型的默认值。API 模式和 Codex 模式分别记住自己的地址与模型，切换时不会覆盖已经可用的 `deepseek-v4-flash` 配置。
 
 非敏感配置保存在 `%LOCALAPPDATA%\AccioModelApiAuth\config.json`。点击“保存并启动 Accio”后，程序只重启本地模型桥并应用新配置；Accio 原网关路由保持不变。
+
+首次启用真实模型显示后需要重启一次 Accio。此后 Accio 模型选择位置会以“`实际模型 · 思考强度 | Accio: 原名称`”显示，并每 5 秒从本地模型桥刷新；OpenCode API 模式没有思考强度时只显示实际模型名。
 
 ### 命令行
 
