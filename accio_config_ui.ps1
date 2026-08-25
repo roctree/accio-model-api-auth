@@ -12,6 +12,8 @@ $codexStatusScript = Join-Path $PSScriptRoot "accio_codex_status.js"
 $nodeExe = "C:\Program Files\nodejs\node.exe"
 $defaultEndpoint = "https://opencode.ai/zen/go/v1/chat/completions"
 $codexEndpoint = "codex-app-server://local"
+$nativeEndpoint = "accio-native://official"
+$nativeModel = "由 Accio 官方管理"
 $defaultModel = "deepseek-v4-flash"
 $defaultCodexModel = "gpt-5.6-sol"
 $lastApiEndpoint = $defaultEndpoint
@@ -174,6 +176,7 @@ $authComboBox.DropDownStyle = "DropDownList"
 [void]$authComboBox.Items.Add("API Key（OpenAI-compatible，保存到 Windows 凭据管理器）")
 [void]$authComboBox.Items.Add("无需认证（本地 OpenAI-compatible 服务）")
 [void]$authComboBox.Items.Add("Codex ChatGPT 登录（由本机 Codex 托管）")
+[void]$authComboBox.Items.Add("Accio 官方原生认证（官方模型与积分）")
 $form.Controls.Add($authComboBox)
 
 $endpointLabel = New-Object System.Windows.Forms.Label
@@ -265,7 +268,7 @@ $saveButton.Size = New-Object System.Drawing.Size(140, 38)
 $form.Controls.Add($saveButton)
 
 $startButton = New-Object System.Windows.Forms.Button
-$startButton.Text = "保存并启动 Accio"
+$startButton.Text = "保存并重启 Accio"
 $startButton.Location = New-Object System.Drawing.Point(484, 495)
 $startButton.Size = New-Object System.Drawing.Size(146, 38)
 $startButton.BackColor = [System.Drawing.Color]::FromArgb(37, 99, 235)
@@ -279,6 +282,9 @@ function Get-SelectedAuthType {
     }
     if ($authComboBox.SelectedIndex -eq 2) {
         return "codex_chatgpt"
+    }
+    if ($authComboBox.SelectedIndex -eq 3) {
+        return "accio_native"
     }
     return "api_key"
 }
@@ -321,23 +327,33 @@ function Update-ReasoningEfforts([string]$preferredEffort = "") {
 
 function Update-ModeControls {
     $usesCodex = $authComboBox.SelectedIndex -eq 2
+    $usesNative = $authComboBox.SelectedIndex -eq 3
     $usesApiKey = $authComboBox.SelectedIndex -eq 0
+
+    if ($script:previousAuthIndex -eq 2) {
+        $script:lastCodexModel = $modelComboBox.Text
+        $script:lastCodexReasoningEffort = $reasoningEffortComboBox.Text
+    } elseif ($script:previousAuthIndex -eq 0 -or $script:previousAuthIndex -eq 1) {
+        $script:lastApiEndpoint = $endpointTextBox.Text
+        $script:lastApiModel = $modelComboBox.Text
+    }
+
     if ($usesCodex) {
-        if ($script:previousAuthIndex -ne 2 -and $endpointTextBox.Text -ne $codexEndpoint) {
-            $script:lastApiEndpoint = $endpointTextBox.Text
-            $script:lastApiModel = $modelComboBox.Text
-        }
         $endpointTextBox.Text = $codexEndpoint
         $modelComboBox.Text = $script:lastCodexModel
         Update-ReasoningEfforts $script:lastCodexReasoningEffort
-    } elseif ($script:previousAuthIndex -eq 2) {
-        $script:lastCodexModel = $modelComboBox.Text
-        $script:lastCodexReasoningEffort = $reasoningEffortComboBox.Text
+    } elseif ($usesNative) {
+        $endpointTextBox.Text = $nativeEndpoint
+        $modelComboBox.Text = $nativeModel
+    } else {
         $endpointTextBox.Text = $script:lastApiEndpoint
         $modelComboBox.Text = $script:lastApiModel
     }
-    $endpointTextBox.Enabled = -not $usesCodex
-    $endpointLabel.Enabled = -not $usesCodex
+
+    $endpointTextBox.Enabled = -not $usesCodex -and -not $usesNative
+    $endpointLabel.Enabled = -not $usesCodex -and -not $usesNative
+    $modelComboBox.Enabled = -not $usesNative
+    $modelLabel.Enabled = -not $usesNative
     $apiKeyTextBox.Enabled = $usesApiKey
     $apiKeyLabel.Enabled = $usesApiKey
     $apiKeyHintLabel.Enabled = $usesApiKey
@@ -391,15 +407,21 @@ function Refresh-CodexStatus {
 
 function Save-Configuration {
     $authType = Get-SelectedAuthType
-    $endpoint = if ($authType -eq "codex_chatgpt") { $codexEndpoint } else { $endpointTextBox.Text.Trim() }
-    $model = $modelComboBox.Text.Trim()
+    $endpoint = if ($authType -eq "codex_chatgpt") {
+        $codexEndpoint
+    } elseif ($authType -eq "accio_native") {
+        $nativeEndpoint
+    } else {
+        $endpointTextBox.Text.Trim()
+    }
+    $model = if ($authType -eq "accio_native") { $nativeModel } else { $modelComboBox.Text.Trim() }
     if ([string]::IsNullOrWhiteSpace($endpoint)) {
         throw "API 地址不能为空"
     }
     if ([string]::IsNullOrWhiteSpace($model)) {
         throw "模型名称不能为空"
     }
-    if ($authType -ne "codex_chatgpt") {
+    if ($authType -ne "codex_chatgpt" -and $authType -ne "accio_native") {
         $uri = $null
         if (-not [Uri]::TryCreate($endpoint, [UriKind]::Absolute, [ref]$uri) -or
             ($uri.Scheme -ne "http" -and $uri.Scheme -ne "https")) {
@@ -409,7 +431,7 @@ function Save-Configuration {
     if ($authType -eq "codex_chatgpt") {
         $script:lastCodexModel = $model
         $script:lastCodexReasoningEffort = $reasoningEffortComboBox.Text
-    } else {
+    } elseif ($authType -ne "accio_native") {
         $script:lastApiEndpoint = $endpoint
         $script:lastApiModel = $model
     }
@@ -482,15 +504,27 @@ $saveButton.Add_Click({
 
 $startButton.Add_Click({
     try {
+        if (Get-Process -Name "Accio" -ErrorAction SilentlyContinue) {
+            $modeName = if ((Get-SelectedAuthType) -eq "accio_native") { "Accio 官方原生认证" } else { "当前自定义模型认证" }
+            $answer = [System.Windows.Forms.MessageBox]::Show(
+                "应用 $modeName 需要重启 Accio。正在运行的任务或未发送内容可能丢失。是否继续？",
+                "确认重启 Accio",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+                return
+            }
+        }
         Save-Configuration
         $statusLabel.Text = "正在应用配置并启动 Accio..."
         $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(37, 99, 235)
         $form.Refresh()
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launcherPath -RestartBridge 2>&1
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launcherPath -RestartBridge -RestartAccio 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw ($output | Out-String)
         }
-        $statusLabel.Text = "Accio 已使用当前模型配置启动"
+        $statusLabel.Text = if ((Get-SelectedAuthType) -eq "accio_native") { "Accio 已恢复官方原生认证" } else { "Accio 已使用当前模型配置启动" }
         $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(21, 128, 61)
     } catch {
         Show-ConfigurationError $_.Exception.Message
@@ -501,12 +535,12 @@ if (Test-Path -LiteralPath $configPath) {
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
     if ($null -ne $config.PSObject.Properties["openAiEndpoint"]) {
         $lastApiEndpoint = [string]$config.openAiEndpoint
-    } elseif ([string]$config.authType -ne "codex_chatgpt") {
+    } elseif ([string]$config.authType -eq "api_key" -or [string]$config.authType -eq "none") {
         $lastApiEndpoint = [string]$config.endpoint
     }
     if ($null -ne $config.PSObject.Properties["openAiModel"]) {
         $lastApiModel = [string]$config.openAiModel
-    } elseif ([string]$config.authType -ne "codex_chatgpt") {
+    } elseif ([string]$config.authType -eq "api_key" -or [string]$config.authType -eq "none") {
         $lastApiModel = [string]$config.model
     }
     if ($null -ne $config.PSObject.Properties["codexModel"]) {
@@ -525,6 +559,8 @@ if (Test-Path -LiteralPath $configPath) {
         $authComboBox.SelectedIndex = 1
     } elseif ([string]$config.authType -eq "codex_chatgpt") {
         $authComboBox.SelectedIndex = 2
+    } elseif ([string]$config.authType -eq "accio_native") {
+        $authComboBox.SelectedIndex = 3
     } else {
         $authComboBox.SelectedIndex = 0
     }

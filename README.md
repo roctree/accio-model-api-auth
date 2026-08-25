@@ -1,6 +1,6 @@
 # Accio Model API Auth
 
-为 Accio Desktop 接入自定义模型 API 或本机 Codex ChatGPT 登录，同时保留 Accio 原有的历史会话、Skill、MCP、插件和浏览器工具能力。
+为 Accio Desktop 接入自定义模型 API 或本机 Codex ChatGPT 登录，也可以一键恢复 Accio 官方原生认证，同时保留 Accio 原有的历史会话、Skill、MCP、插件和浏览器工具能力。
 
 > 这是非官方社区项目，与 Accio、阿里巴巴、OpenCode 或 OpenAI 无隶属关系。Accio 更新后，内部接口可能发生变化。
 
@@ -14,6 +14,7 @@
 - 可通过 Codex App Server 使用本机 ChatGPT 托管登录，不需要复制 OAuth Token。
 - Codex 模型列表和每个模型支持的思考强度从本机 App Server 动态读取，已验证文本、多轮对话和动态工具结果回传。
 - Accio 的模型选择位置会显示模型桥实际使用的模型；Codex 模式同时显示思考强度，切换配置后自动刷新。
+- 可切换回 Accio 官方原生认证，使用 Accio 自己的登录、官方模型和积分；已有 OpenCode 与 Codex 配置不会被删除。
 - OpenCode API Key 保存在 Windows 凭据管理器中，不写入源码或配置文件。
 - Accio 本地网关口令在首次启动时随机生成，并保存在 Windows 凭据管理器中。
 
@@ -48,10 +49,11 @@ powershell -ExecutionPolicy Bypass -File .\accio_config_ui.ps1
 - API Key 认证，Key 保存到 Windows 凭据管理器。
 - 无认证模式，用于本机 Ollama、vLLM 等兼容服务。
 - Codex ChatGPT 登录模式，登录状态、模型列表和思考强度由本机 Codex App Server 提供。
+- Accio 官方原生认证模式，不经过本地模型桥或路由网关。
 
 Codex 模式下可在界面中点击“登录 Codex”，登录完成后点击“刷新 Codex 登录和模型”。选择模型后，“思考强度”只显示该模型实际支持的 `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`；切换到不支持当前强度的模型时自动使用该模型的默认值。API 模式和 Codex 模式分别记住自己的地址与模型，切换时不会覆盖已经可用的 `deepseek-v4-flash` 配置。
 
-非敏感配置保存在 `%LOCALAPPDATA%\AccioModelApiAuth\config.json`。点击“保存并启动 Accio”后，程序只重启本地模型桥并应用新配置；Accio 原网关路由保持不变。
+非敏感配置保存在 `%LOCALAPPDATA%\AccioModelApiAuth\config.json`。点击“保存并重启 Accio”后会先提示重启风险，再应用所选认证方式。切换到官方原生认证时，Accio 不再注入 `GATEWAY_BASE_URL`，模型、认证和积分全部恢复为 Accio 官方逻辑；切回 API 或 Codex 模式时继续使用之前保存的地址、模型和凭据，无需重新填写。
 
 首次启用真实模型显示后需要重启一次 Accio。此后 Accio 模型选择位置会以“`实际模型 · 思考强度 | Accio: 原名称`”显示，并每 5 秒从本地模型桥刷新；OpenCode API 模式没有思考强度时只显示实际模型名。
 

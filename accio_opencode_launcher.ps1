@@ -1,7 +1,8 @@
 param(
     [switch]$StoreCredential,
     [switch]$BackendOnly,
-    [switch]$RestartBridge
+    [switch]$RestartBridge,
+    [switch]$RestartAccio
 )
 
 Set-StrictMode -Version Latest
@@ -42,6 +43,123 @@ if ($authType -eq "codex_chatgpt") {
     $bridgeScript = $codexBridgeScript
 } else {
     $bridgeScript = $openAiBridgeScript
+}
+
+function Get-AccioProcesses {
+    $processes = @()
+    foreach ($process in @(Get-Process -Name "Accio" -ErrorAction SilentlyContinue)) {
+        try {
+            if ([string]::Equals($process.Path, $accioExe, [StringComparison]::OrdinalIgnoreCase)) {
+                $processes += $process
+            }
+        } catch {}
+    }
+    return $processes
+}
+
+function Stop-AccioProcesses {
+    $processes = @(Get-AccioProcesses)
+    if ($processes.Count -eq 0) {
+        return
+    }
+    foreach ($process in @($processes | Where-Object { $_.MainWindowHandle -ne 0 })) {
+        [void]$process.CloseMainWindow()
+    }
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        Start-Sleep -Milliseconds 100
+        if (@(Get-AccioProcesses).Count -eq 0) {
+            return
+        }
+    }
+    $remaining = @(Get-AccioProcesses)
+    if ($remaining.Count -gt 0) {
+        Stop-Process -Id $remaining.Id -Force
+    }
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        Start-Sleep -Milliseconds 100
+        if (@(Get-AccioProcesses).Count -eq 0) {
+            return
+        }
+    }
+    throw "Accio did not stop"
+}
+
+function Restore-AccioModelCacheLabels {
+    $modelCachePath = Join-Path $env:USERPROFILE ".accio\model_cache.json"
+    if (-not (Test-Path -LiteralPath $modelCachePath)) {
+        return
+    }
+    $cache = Get-Content -LiteralPath $modelCachePath -Raw | ConvertFrom-Json
+    if ($null -eq $cache.PSObject.Properties["snapshots"]) {
+        return
+    }
+    $separator = " | Accio: "
+    $changed = $false
+    foreach ($snapshotProperty in $cache.snapshots.PSObject.Properties) {
+        $snapshot = $snapshotProperty.Value
+        foreach ($provider in @($snapshot.data)) {
+            foreach ($item in @($provider.modelList)) {
+                if ($null -eq $item.PSObject.Properties["modelDisplayName"]) {
+                    continue
+                }
+                $displayName = [string]$item.modelDisplayName
+                $separatorIndex = $displayName.IndexOf($separator, [StringComparison]::Ordinal)
+                if ($separatorIndex -ge 0) {
+                    $item.modelDisplayName = $displayName.Substring($separatorIndex + $separator.Length).Trim()
+                    $changed = $true
+                }
+            }
+        }
+        if ($null -eq $snapshot.PSObject.Properties["ext"]) {
+            continue
+        }
+        foreach ($label in @($snapshot.ext.labelList)) {
+            if ($null -eq $label.PSObject.Properties["displayName"]) {
+                continue
+            }
+            $displayName = [string]$label.displayName
+            $separatorIndex = $displayName.IndexOf($separator, [StringComparison]::Ordinal)
+            if ($separatorIndex -ge 0) {
+                $label.displayName = $displayName.Substring($separatorIndex + $separator.Length).Trim()
+                $changed = $true
+            }
+        }
+        if ($null -ne $snapshot.ext.PSObject.Properties["version"]) {
+            $version = [string]$snapshot.ext.version
+            $markerIndex = $version.IndexOf("-actual-", [StringComparison]::Ordinal)
+            if ($markerIndex -ge 0) {
+                $snapshot.ext.version = $version.Substring(0, $markerIndex)
+                $changed = $true
+            }
+        }
+    }
+    if ($changed) {
+        $json = $cache | ConvertTo-Json -Depth 100
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText($modelCachePath, $json, $utf8NoBom)
+    }
+}
+
+if ($authType -eq "accio_native" -and -not $StoreCredential) {
+    if ($BackendOnly) {
+        Write-Output "Accio native authentication does not require a local backend."
+        return
+    }
+    if (@(Get-AccioProcesses).Count -gt 0 -and -not $RestartAccio) {
+        throw "Accio is already running. Use -RestartAccio to apply native authentication."
+    }
+    if ($RestartAccio) {
+        Stop-AccioProcesses
+    }
+    Restore-AccioModelCacheLabels
+    Remove-Item Env:GATEWAY_BASE_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:FAST_BUILD -ErrorAction SilentlyContinue
+    Remove-Item Env:ACCIO_DEV_GATEWAY_PASSWORD -ErrorAction SilentlyContinue
+    if (@(Get-AccioProcesses).Count -eq 0) {
+        Start-Process -FilePath $accioExe
+    }
+    Write-Output "Accio is ready with native authentication and official models."
+    return
 }
 
 if (-not (Test-Path -LiteralPath $nodeExe)) {
@@ -319,11 +437,16 @@ if ($null -eq $relayHealth -or $relayHealth.modelBridge -ne $bridgeUrl -or $rela
     throw "Accio relay health check failed"
 }
 
-if (-not $BackendOnly -and -not (Get-Process -Name "Accio" -ErrorAction SilentlyContinue)) {
-    $env:GATEWAY_BASE_URL = $relayUrl
-    $env:FAST_BUILD = "true"
-    $env:ACCIO_DEV_GATEWAY_PASSWORD = $localGatewayPassword
-    Start-Process -FilePath $accioExe
+if (-not $BackendOnly) {
+    if ($RestartAccio) {
+        Stop-AccioProcesses
+    }
+    if (@(Get-AccioProcesses).Count -eq 0) {
+        $env:GATEWAY_BASE_URL = $relayUrl
+        $env:FAST_BUILD = "true"
+        $env:ACCIO_DEV_GATEWAY_PASSWORD = $localGatewayPassword
+        Start-Process -FilePath $accioExe
+    }
 }
 
 Write-Output "Accio model API backend is ready: $authType / $model"
