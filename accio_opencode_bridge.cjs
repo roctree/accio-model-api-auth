@@ -5,8 +5,14 @@ const PORT = Number(process.env.ACCIO_OPENCODE_PORT || 18765);
 const MODEL = process.env.OPENCODE_GO_MODEL || "deepseek-v4-flash";
 const ENDPOINT = process.env.OPENCODE_GO_ENDPOINT || "https://opencode.ai/zen/go/v1/chat/completions";
 const AUTH_TYPE = process.env.ACCIO_MODEL_AUTH_TYPE || "api_key";
+const REASONING_MODE = process.env.OPENCODE_GO_REASONING_EFFORT || "high";
 const ORIGINAL_GATEWAY = (process.env.ACCIO_ORIGINAL_GATEWAY_URL || "https://phoenix-gw.alibaba.com").replace(/\/+$/, "");
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const reasoningByToolCallId = new Map();
+
+if (!["disabled", "low", "high", "max"].includes(REASONING_MODE)) {
+  throw new Error(`Unsupported reasoning mode: ${REASONING_MODE}`);
+}
 
 function valueOf(object, camel, snake) {
   return object?.[camel] ?? object?.[snake];
@@ -89,10 +95,14 @@ function messagesFromContents(contents) {
     const toolCalls = parts.map(functionCallFromPart).filter(Boolean);
     const text = contentFromParts(parts);
     if (toolCalls.length > 0 || text !== null) {
+      const reasoningContent = toolCalls
+        .map((call) => reasoningByToolCallId.get(call.id))
+        .find((value) => typeof value === "string" && value.length > 0);
       messages.push({
         role,
         content: text,
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
       });
     }
   }
@@ -170,12 +180,12 @@ function toOpenAiRequest(payload) {
   const maxTokens = valueOf(payload, "maxOutputTokens", "max_output_tokens");
   const topP = valueOf(payload, "topP", "top_p");
   const stop = valueOf(payload, "stopSequences", "stop_sequences");
-  const reasoningEffort = valueOf(payload, "reasoningEffort", "reasoning_effort");
   if (temperature !== undefined) request.temperature = temperature;
   if (maxTokens !== undefined) request.max_tokens = maxTokens;
   if (topP !== undefined) request.top_p = topP;
   if (Array.isArray(stop) && stop.length > 0) request.stop = stop;
-  if (reasoningEffort !== undefined) request.reasoning_effort = reasoningEffort;
+  request.thinking = { type: REASONING_MODE === "disabled" ? "disabled" : "enabled" };
+  if (REASONING_MODE !== "disabled") request.reasoning_effort = REASONING_MODE;
   if (tools.length > 0) {
     request.tools = tools;
     const toolChoice = openAiToolChoice(valueOf(payload, "toolChoice", "tool_choice"));
@@ -282,6 +292,7 @@ async function proxy(request, response, payload) {
   let responseId;
   let usage;
   let finishReason;
+  let reasoningContent = "";
   for await (const data of sseData(upstream.body)) {
     if (data === "[DONE]") continue;
     let chunk;
@@ -295,13 +306,16 @@ async function proxy(request, response, payload) {
     const choice = chunk.choices?.[0];
     const delta = choice?.delta;
     finishReason ||= choice?.finish_reason;
+    if (typeof delta?.reasoning_content === "string") {
+      reasoningContent += delta.reasoning_content;
+    }
     if (typeof delta?.content === "string" && delta.content.length > 0) {
       sawOutput = true;
       sendFrame(response, {
         content: { role: "model", parts: [{ text: delta.content }] },
         partial: true,
         turnComplete: false,
-        customMetadata: { model: MODEL, response_id: responseId },
+        customMetadata: { model: MODEL, reasoning_effort: REASONING_MODE, response_id: responseId },
       });
     }
     for (const call of Array.isArray(delta?.tool_calls) ? delta.tool_calls : []) {
@@ -320,7 +334,17 @@ async function proxy(request, response, payload) {
       argsJson: call.arguments || "{}",
     },
   }));
-  if (parts.length > 0) sawOutput = true;
+  if (parts.length > 0) {
+    sawOutput = true;
+    if (reasoningContent) {
+      for (const call of toolCalls.values()) {
+        if (call.id) reasoningByToolCallId.set(call.id, reasoningContent);
+      }
+      while (reasoningByToolCallId.size > 256) {
+        reasoningByToolCallId.delete(reasoningByToolCallId.keys().next().value);
+      }
+    }
+  }
   sendFrame(response, {
     content: parts.length > 0
       ? { role: "model", parts }
@@ -331,7 +355,7 @@ async function proxy(request, response, payload) {
     turnComplete: true,
     finishReason: finishReason || "STOP",
     usageMetadata: usage,
-    customMetadata: { model: MODEL, response_id: responseId },
+    customMetadata: { model: MODEL, reasoning_effort: REASONING_MODE, response_id: responseId },
   });
   response.end();
 }
@@ -392,7 +416,7 @@ async function forwardGateway(request, response) {
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/healthz") {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ ok: true, model: MODEL, endpoint: ENDPOINT, authType: AUTH_TYPE, apiKeyConfigured: Boolean(process.env.OPENCODE_GO_API_KEY) }));
+    response.end(JSON.stringify({ ok: true, model: MODEL, endpoint: ENDPOINT, authType: AUTH_TYPE, reasoningEffort: REASONING_MODE, apiKeyConfigured: Boolean(process.env.OPENCODE_GO_API_KEY) }));
     return;
   }
   if (request.url?.startsWith("/api/adk/llm/generateContent") && request.method === "POST") {
@@ -423,6 +447,7 @@ server.listen(PORT, HOST, () => {
   console.log(`Accio model bridge listening on http://${HOST}:${PORT}`);
   console.log(`model=${MODEL}`);
   console.log(`authType=${AUTH_TYPE}`);
+  console.log(`reasoningEffort=${REASONING_MODE}`);
   console.log(`originalGateway=${ORIGINAL_GATEWAY}`);
   console.log(`apiKeyConfigured=${Boolean(process.env.OPENCODE_GO_API_KEY)}`);
 });

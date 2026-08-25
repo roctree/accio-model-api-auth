@@ -22,19 +22,41 @@ $menu = $null
 $notifyIcon = $null
 $statusTimer = $null
 
+function Get-ReasoningSummary([string]$reasoningEffort) {
+    if ([string]::IsNullOrWhiteSpace($reasoningEffort)) {
+        return "默认"
+    }
+    switch ($reasoningEffort) {
+        "disabled" { return "关闭" }
+        "low" { return "低" }
+        "medium" { return "中" }
+        "high" { return "高" }
+        "xhigh" { return "很高" }
+        "max" { return "最高" }
+        "ultra" { return "极高" }
+        default { return $reasoningEffort }
+    }
+}
+
 function Get-CurrentModeSummary {
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
     if ([string]$config.authType -eq "accio_native") {
-        return "Accio 官方原生认证"
+        return "Accio 官方原生认证 / 思考由 Accio 控制"
     }
     if ([string]$config.authType -eq "codex_chatgpt") {
-        $reasoning = if ([string]::IsNullOrWhiteSpace([string]$config.reasoningEffort)) { "默认思考强度" } else { [string]$config.reasoningEffort }
-        return "Codex / $([string]$config.model) / $reasoning"
+        $reasoning = Get-ReasoningSummary ([string]$config.reasoningEffort)
+        return "Codex / $([string]$config.model) / 思考$reasoning"
     }
-    if ([string]$config.authType -eq "none") {
-        return "无认证 API / $([string]$config.model)"
+    $reasoningEffort = [string]$config.reasoningEffort
+    if ([string]::IsNullOrWhiteSpace($reasoningEffort) -and $null -ne $config.PSObject.Properties["openAiReasoningEffort"]) {
+        $reasoningEffort = [string]$config.openAiReasoningEffort
     }
-    return "API Key / $([string]$config.model)"
+    if ([string]::IsNullOrWhiteSpace($reasoningEffort)) {
+        $reasoningEffort = "high"
+    }
+    $reasoning = Get-ReasoningSummary $reasoningEffort
+    $apiAuthentication = if ([string]$config.authType -eq "none") { "不使用 API Key" } else { "API Key" }
+    return "API / $([string]$config.model) / 思考$reasoning / $apiAuthentication"
 }
 
 function Update-TrayStatus {

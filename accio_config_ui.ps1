@@ -18,6 +18,8 @@ $defaultModel = "deepseek-v4-flash"
 $defaultCodexModel = "gpt-5.6-sol"
 $lastApiEndpoint = $defaultEndpoint
 $lastApiModel = $defaultModel
+$lastApiReasoningEffort = "high"
+$lastApiUseApiKey = $true
 $lastCodexModel = $defaultCodexModel
 $lastCodexReasoningEffort = ""
 $codexModelsById = @{}
@@ -134,7 +136,7 @@ function Get-CodexStatus {
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Accio 模型 API 与 Codex 登录配置"
+$form.Text = "Accio 模型接入配置"
 $form.ClientSize = New-Object System.Drawing.Size(660, 550)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
@@ -149,7 +151,7 @@ $headerPanel.BackColor = [System.Drawing.Color]::FromArgb(31, 41, 55)
 $form.Controls.Add($headerPanel)
 
 $titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = "Accio 模型认证配置"
+$titleLabel.Text = "Accio 模型接入配置"
 $titleLabel.Location = New-Object System.Drawing.Point(28, 17)
 $titleLabel.Size = New-Object System.Drawing.Size(500, 30)
 $titleLabel.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 16, [System.Drawing.FontStyle]::Bold)
@@ -164,7 +166,7 @@ $subtitleLabel.ForeColor = [System.Drawing.Color]::FromArgb(209, 213, 219)
 $headerPanel.Controls.Add($subtitleLabel)
 
 $authLabel = New-Object System.Windows.Forms.Label
-$authLabel.Text = "认证方式"
+$authLabel.Text = "接入方式"
 $authLabel.Location = New-Object System.Drawing.Point(30, 105)
 $authLabel.Size = New-Object System.Drawing.Size(120, 22)
 $form.Controls.Add($authLabel)
@@ -173,8 +175,7 @@ $authComboBox = New-Object System.Windows.Forms.ComboBox
 $authComboBox.Location = New-Object System.Drawing.Point(30, 130)
 $authComboBox.Size = New-Object System.Drawing.Size(600, 28)
 $authComboBox.DropDownStyle = "DropDownList"
-[void]$authComboBox.Items.Add("API Key（OpenAI-compatible，保存到 Windows 凭据管理器）")
-[void]$authComboBox.Items.Add("无需认证（本地 OpenAI-compatible 服务）")
+[void]$authComboBox.Items.Add("OpenAI-compatible API（API Key 可选）")
 [void]$authComboBox.Items.Add("Codex ChatGPT 登录（由本机 Codex 托管）")
 [void]$authComboBox.Items.Add("Accio 官方原生认证（官方模型与积分）")
 $form.Controls.Add($authComboBox)
@@ -205,7 +206,7 @@ $modelComboBox.AutoCompleteSource = "ListItems"
 $form.Controls.Add($modelComboBox)
 
 $reasoningEffortLabel = New-Object System.Windows.Forms.Label
-$reasoningEffortLabel.Text = "思考强度"
+$reasoningEffortLabel.Text = "思考模式"
 $reasoningEffortLabel.Location = New-Object System.Drawing.Point(300, 245)
 $reasoningEffortLabel.Size = New-Object System.Drawing.Size(120, 22)
 $form.Controls.Add($reasoningEffortLabel)
@@ -228,6 +229,13 @@ $apiKeyLabel.Location = New-Object System.Drawing.Point(30, 316)
 $apiKeyLabel.Size = New-Object System.Drawing.Size(120, 22)
 $form.Controls.Add($apiKeyLabel)
 
+$apiKeyAuthCheckBox = New-Object System.Windows.Forms.CheckBox
+$apiKeyAuthCheckBox.Text = "使用 API Key 认证"
+$apiKeyAuthCheckBox.Location = New-Object System.Drawing.Point(155, 314)
+$apiKeyAuthCheckBox.Size = New-Object System.Drawing.Size(180, 24)
+$apiKeyAuthCheckBox.Checked = $true
+$form.Controls.Add($apiKeyAuthCheckBox)
+
 $apiKeyTextBox = New-Object System.Windows.Forms.TextBox
 $apiKeyTextBox.Location = New-Object System.Drawing.Point(30, 341)
 $apiKeyTextBox.Size = New-Object System.Drawing.Size(600, 28)
@@ -235,7 +243,7 @@ $apiKeyTextBox.UseSystemPasswordChar = $true
 $form.Controls.Add($apiKeyTextBox)
 
 $apiKeyHintLabel = New-Object System.Windows.Forms.Label
-$apiKeyHintLabel.Text = "留空将保留已有凭据；Key 不会写入 config.json 或 Git 仓库。"
+$apiKeyHintLabel.Text = "留空将保留已有凭据；取消勾选时不发送 Key，但不会删除已保存的 Key。"
 $apiKeyHintLabel.Location = New-Object System.Drawing.Point(30, 374)
 $apiKeyHintLabel.Size = New-Object System.Drawing.Size(600, 20)
 $apiKeyHintLabel.ForeColor = [System.Drawing.Color]::FromArgb(107, 114, 128)
@@ -278,15 +286,65 @@ $form.Controls.Add($startButton)
 
 function Get-SelectedAuthType {
     if ($authComboBox.SelectedIndex -eq 1) {
-        return "none"
-    }
-    if ($authComboBox.SelectedIndex -eq 2) {
         return "codex_chatgpt"
     }
-    if ($authComboBox.SelectedIndex -eq 3) {
+    if ($authComboBox.SelectedIndex -eq 2) {
         return "accio_native"
     }
-    return "api_key"
+    if ($apiKeyAuthCheckBox.Checked) {
+        return "api_key"
+    }
+    return "none"
+}
+
+function Get-SelectedApiReasoningEffort {
+    switch ($reasoningEffortComboBox.SelectedIndex) {
+        0 { return "disabled" }
+        1 { return "low" }
+        2 { return "high" }
+        3 { return "max" }
+        default { return "high" }
+    }
+}
+
+function Get-SelectedReasoningEffort {
+    if ($authComboBox.SelectedIndex -eq 0) {
+        return (Get-SelectedApiReasoningEffort)
+    }
+    if ($authComboBox.SelectedIndex -eq 1) {
+        return $reasoningEffortComboBox.Text
+    }
+    return ""
+}
+
+function Update-ApiReasoningEfforts([string]$preferredEffort = "high") {
+    $reasoningEffortComboBox.BeginUpdate()
+    try {
+        $reasoningEffortComboBox.Items.Clear()
+        [void]$reasoningEffortComboBox.Items.Add("关闭")
+        [void]$reasoningEffortComboBox.Items.Add("低")
+        [void]$reasoningEffortComboBox.Items.Add("高（默认）")
+        [void]$reasoningEffortComboBox.Items.Add("最高")
+        switch ($preferredEffort) {
+            "disabled" { $reasoningEffortComboBox.SelectedIndex = 0 }
+            "low" { $reasoningEffortComboBox.SelectedIndex = 1 }
+            "max" { $reasoningEffortComboBox.SelectedIndex = 3 }
+            default { $reasoningEffortComboBox.SelectedIndex = 2 }
+        }
+    } finally {
+        $reasoningEffortComboBox.EndUpdate()
+    }
+}
+
+function Update-NativeReasoningEffort {
+    $reasoningEffortComboBox.BeginUpdate()
+    try {
+        $reasoningEffortComboBox.Items.Clear()
+        [void]$reasoningEffortComboBox.Items.Add("由 Accio 官方控制")
+        $reasoningEffortComboBox.SelectedIndex = 0
+    } finally {
+        $reasoningEffortComboBox.EndUpdate()
+    }
 }
 
 function Update-ReasoningEfforts([string]$preferredEffort = "") {
@@ -326,39 +384,45 @@ function Update-ReasoningEfforts([string]$preferredEffort = "") {
 }
 
 function Update-ModeControls {
-    $usesCodex = $authComboBox.SelectedIndex -eq 2
-    $usesNative = $authComboBox.SelectedIndex -eq 3
-    $usesApiKey = $authComboBox.SelectedIndex -eq 0
+    $usesApi = $authComboBox.SelectedIndex -eq 0
+    $usesCodex = $authComboBox.SelectedIndex -eq 1
+    $usesNative = $authComboBox.SelectedIndex -eq 2
 
-    if ($script:previousAuthIndex -eq 2) {
+    if ($script:previousAuthIndex -eq 1) {
         $script:lastCodexModel = $modelComboBox.Text
         $script:lastCodexReasoningEffort = $reasoningEffortComboBox.Text
-    } elseif ($script:previousAuthIndex -eq 0 -or $script:previousAuthIndex -eq 1) {
+    } elseif ($script:previousAuthIndex -eq 0) {
         $script:lastApiEndpoint = $endpointTextBox.Text
         $script:lastApiModel = $modelComboBox.Text
+        $script:lastApiReasoningEffort = Get-SelectedApiReasoningEffort
+        $script:lastApiUseApiKey = $apiKeyAuthCheckBox.Checked
     }
 
-    if ($usesCodex) {
+    if ($usesApi) {
+        $endpointTextBox.Text = $script:lastApiEndpoint
+        $modelComboBox.Text = $script:lastApiModel
+        $apiKeyAuthCheckBox.Checked = $script:lastApiUseApiKey
+        Update-ApiReasoningEfforts $script:lastApiReasoningEffort
+    } elseif ($usesCodex) {
         $endpointTextBox.Text = $codexEndpoint
         $modelComboBox.Text = $script:lastCodexModel
         Update-ReasoningEfforts $script:lastCodexReasoningEffort
     } elseif ($usesNative) {
         $endpointTextBox.Text = $nativeEndpoint
         $modelComboBox.Text = $nativeModel
-    } else {
-        $endpointTextBox.Text = $script:lastApiEndpoint
-        $modelComboBox.Text = $script:lastApiModel
+        Update-NativeReasoningEffort
     }
 
-    $endpointTextBox.Enabled = -not $usesCodex -and -not $usesNative
-    $endpointLabel.Enabled = -not $usesCodex -and -not $usesNative
+    $endpointTextBox.Enabled = $usesApi
+    $endpointLabel.Enabled = $usesApi
     $modelComboBox.Enabled = -not $usesNative
     $modelLabel.Enabled = -not $usesNative
-    $apiKeyTextBox.Enabled = $usesApiKey
-    $apiKeyLabel.Enabled = $usesApiKey
-    $apiKeyHintLabel.Enabled = $usesApiKey
-    $reasoningEffortLabel.Enabled = $usesCodex
-    $reasoningEffortComboBox.Enabled = $usesCodex
+    $apiKeyAuthCheckBox.Enabled = $usesApi
+    $apiKeyTextBox.Enabled = $usesApi -and $apiKeyAuthCheckBox.Checked
+    $apiKeyLabel.Enabled = $usesApi -and $apiKeyAuthCheckBox.Checked
+    $apiKeyHintLabel.Enabled = $usesApi
+    $reasoningEffortLabel.Enabled = -not $usesNative
+    $reasoningEffortComboBox.Enabled = -not $usesNative
     $codexRefreshButton.Enabled = $usesCodex
     $codexLoginButton.Enabled = $usesCodex
     $script:previousAuthIndex = $authComboBox.SelectedIndex
@@ -401,12 +465,13 @@ function Refresh-CodexStatus {
         }
     } finally {
         $form.UseWaitCursor = $false
-        $codexRefreshButton.Enabled = $authComboBox.SelectedIndex -eq 2
+        $codexRefreshButton.Enabled = $authComboBox.SelectedIndex -eq 1
     }
 }
 
 function Save-Configuration {
     $authType = Get-SelectedAuthType
+    $reasoningEffort = Get-SelectedReasoningEffort
     $endpoint = if ($authType -eq "codex_chatgpt") {
         $codexEndpoint
     } elseif ($authType -eq "accio_native") {
@@ -430,19 +495,23 @@ function Save-Configuration {
     }
     if ($authType -eq "codex_chatgpt") {
         $script:lastCodexModel = $model
-        $script:lastCodexReasoningEffort = $reasoningEffortComboBox.Text
+        $script:lastCodexReasoningEffort = $reasoningEffort
     } elseif ($authType -ne "accio_native") {
         $script:lastApiEndpoint = $endpoint
         $script:lastApiModel = $model
+        $script:lastApiReasoningEffort = $reasoningEffort
+        $script:lastApiUseApiKey = $apiKeyAuthCheckBox.Checked
     }
     New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
     [ordered]@{
         endpoint = $endpoint
         model = $model
-        reasoningEffort = if ($authType -eq "codex_chatgpt") { $script:lastCodexReasoningEffort } else { "" }
+        reasoningEffort = if ($authType -eq "codex_chatgpt") { $script:lastCodexReasoningEffort } elseif ($authType -ne "accio_native") { $script:lastApiReasoningEffort } else { "" }
         authType = $authType
         openAiEndpoint = $script:lastApiEndpoint
         openAiModel = $script:lastApiModel
+        openAiReasoningEffort = $script:lastApiReasoningEffort
+        openAiUseApiKey = $script:lastApiUseApiKey
         codexModel = $script:lastCodexModel
         codexReasoningEffort = $script:lastCodexReasoningEffort
     } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
@@ -457,7 +526,7 @@ function Show-ConfigurationError([string]$message) {
     $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(185, 28, 28)
     [System.Windows.Forms.MessageBox]::Show(
         $message,
-        "Accio 模型认证配置",
+        "Accio 模型接入配置",
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error
     ) | Out-Null
@@ -467,8 +536,14 @@ $authComboBox.Add_SelectedIndexChanged({
     Update-ModeControls
 })
 
+$apiKeyAuthCheckBox.Add_CheckedChanged({
+    $usesApiKey = $authComboBox.SelectedIndex -eq 0 -and $apiKeyAuthCheckBox.Checked
+    $apiKeyTextBox.Enabled = $usesApiKey
+    $apiKeyLabel.Enabled = $usesApiKey
+})
+
 $modelComboBox.Add_SelectedIndexChanged({
-    if ($authComboBox.SelectedIndex -eq 2) {
+    if ($authComboBox.SelectedIndex -eq 1) {
         Update-ReasoningEfforts
     }
 })
@@ -543,6 +618,18 @@ if (Test-Path -LiteralPath $configPath) {
     } elseif ([string]$config.authType -eq "api_key" -or [string]$config.authType -eq "none") {
         $lastApiModel = [string]$config.model
     }
+    if ($null -ne $config.PSObject.Properties["openAiReasoningEffort"]) {
+        $lastApiReasoningEffort = [string]$config.openAiReasoningEffort
+    } elseif (([string]$config.authType -eq "api_key" -or [string]$config.authType -eq "none") -and
+        $null -ne $config.PSObject.Properties["reasoningEffort"] -and
+        -not [string]::IsNullOrWhiteSpace([string]$config.reasoningEffort)) {
+        $lastApiReasoningEffort = [string]$config.reasoningEffort
+    }
+    if ($null -ne $config.PSObject.Properties["openAiUseApiKey"]) {
+        $lastApiUseApiKey = [bool]$config.openAiUseApiKey
+    } elseif ([string]$config.authType -eq "none") {
+        $lastApiUseApiKey = $false
+    }
     if ($null -ne $config.PSObject.Properties["codexModel"]) {
         $lastCodexModel = [string]$config.codexModel
     } elseif ([string]$config.authType -eq "codex_chatgpt") {
@@ -555,12 +642,13 @@ if (Test-Path -LiteralPath $configPath) {
     }
     $endpointTextBox.Text = [string]$config.endpoint
     $modelComboBox.Text = [string]$config.model
-    if ([string]$config.authType -eq "none") {
-        $authComboBox.SelectedIndex = 1
+    if ([string]$config.authType -eq "api_key" -or [string]$config.authType -eq "none") {
+        $apiKeyAuthCheckBox.Checked = [string]$config.authType -eq "api_key"
+        $authComboBox.SelectedIndex = 0
     } elseif ([string]$config.authType -eq "codex_chatgpt") {
-        $authComboBox.SelectedIndex = 2
+        $authComboBox.SelectedIndex = 1
     } elseif ([string]$config.authType -eq "accio_native") {
-        $authComboBox.SelectedIndex = 3
+        $authComboBox.SelectedIndex = 2
     } else {
         $authComboBox.SelectedIndex = 0
     }
@@ -572,7 +660,7 @@ if (Test-Path -LiteralPath $configPath) {
 Update-ModeControls
 
 $form.Add_Shown({
-    if ($authComboBox.SelectedIndex -eq 2) {
+    if ($authComboBox.SelectedIndex -eq 1) {
         try {
             Refresh-CodexStatus
         } catch {

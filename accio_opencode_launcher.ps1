@@ -20,7 +20,8 @@ $configDirectory = Join-Path $env:LOCALAPPDATA "AccioModelApiAuth"
 $configPath = Join-Path $configDirectory "config.json"
 $nodeExe = "C:\Program Files\nodejs\node.exe"
 $accioExe = Join-Path $env:LOCALAPPDATA "Programs\Accio\Accio.exe"
-$openAiBridgeScript = Join-Path $PSScriptRoot "accio_opencode_bridge.js"
+$openAiBridgeScript = Join-Path $PSScriptRoot "accio_opencode_bridge.cjs"
+$legacyOpenAiBridgeScript = Join-Path $PSScriptRoot "accio_opencode_bridge.js"
 $codexBridgeScript = Join-Path $PSScriptRoot "accio_codex_bridge.js"
 $relayScript = Join-Path $PSScriptRoot "accio_gateway_relay.js"
 $relayLog = Join-Path $PSScriptRoot "accio_gateway_relay.log"
@@ -36,6 +37,14 @@ if (Test-Path -LiteralPath $configPath) {
     if ($authType -eq "codex_chatgpt" -and [string]::IsNullOrWhiteSpace($reasoningEffort) -and
         $null -ne $config.PSObject.Properties["codexReasoningEffort"]) {
         $reasoningEffort = [string]$config.codexReasoningEffort
+    }
+    if (($authType -eq "api_key" -or $authType -eq "none") -and [string]::IsNullOrWhiteSpace($reasoningEffort)) {
+        if ($null -ne $config.PSObject.Properties["openAiReasoningEffort"] -and
+            -not [string]::IsNullOrWhiteSpace([string]$config.openAiReasoningEffort)) {
+            $reasoningEffort = [string]$config.openAiReasoningEffort
+        } else {
+            $reasoningEffort = "high"
+        }
     }
 }
 if ($authType -eq "codex_chatgpt") {
@@ -318,7 +327,7 @@ function Stop-BridgeProcess {
     $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($connection.OwningProcess)"
     $knownBridge = $false
     if ($null -ne $process -and -not [string]::IsNullOrWhiteSpace($process.CommandLine)) {
-        foreach ($knownScript in @($openAiBridgeScript, $codexBridgeScript)) {
+        foreach ($knownScript in @($openAiBridgeScript, $legacyOpenAiBridgeScript, $codexBridgeScript)) {
             if ($process.CommandLine.IndexOf($knownScript, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
                 $knownBridge = $true
                 break
@@ -344,7 +353,7 @@ $bridgeReasoningEffort = ""
 if ($null -ne $bridgeHealth -and $null -ne $bridgeHealth.PSObject.Properties["authType"]) {
     $bridgeAuthType = [string]$bridgeHealth.authType
 }
-$expectedReasoningEffort = if ($authType -eq "codex_chatgpt" -and -not [string]::IsNullOrWhiteSpace($reasoningEffort)) { $reasoningEffort } else { "default" }
+$expectedReasoningEffort = if (-not [string]::IsNullOrWhiteSpace($reasoningEffort)) { $reasoningEffort } else { "default" }
 if ($null -ne $bridgeHealth -and $null -ne $bridgeHealth.PSObject.Properties["reasoningEffort"]) {
     $bridgeReasoningEffort = [string]$bridgeHealth.reasoningEffort
 }
@@ -352,7 +361,7 @@ $bridgeConfigurationChanged = $null -ne $bridgeHealth -and (
     $bridgeHealth.model -ne $model -or
     $bridgeHealth.endpoint -ne $endpoint -or
     $bridgeAuthType -ne $authType -or
-    ($authType -eq "codex_chatgpt" -and $bridgeReasoningEffort -ne $expectedReasoningEffort)
+    $bridgeReasoningEffort -ne $expectedReasoningEffort
 )
 if ($null -ne $bridgeHealth -and ($RestartBridge -or $bridgeConfigurationChanged)) {
     Stop-BridgeProcess
@@ -367,11 +376,13 @@ if ($null -eq $bridgeHealth) {
         $env:OPENCODE_GO_API_KEY = $apiKey
         $env:OPENCODE_GO_MODEL = $model
         $env:OPENCODE_GO_ENDPOINT = $endpoint
+        $env:OPENCODE_GO_REASONING_EFFORT = $reasoningEffort
         $env:ACCIO_MODEL_AUTH_TYPE = $authType
     } elseif ($authType -eq "none") {
         Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
         $env:OPENCODE_GO_MODEL = $model
         $env:OPENCODE_GO_ENDPOINT = $endpoint
+        $env:OPENCODE_GO_REASONING_EFFORT = $reasoningEffort
         $env:ACCIO_MODEL_AUTH_TYPE = $authType
     } elseif ($authType -eq "codex_chatgpt") {
         Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
@@ -387,8 +398,9 @@ if ($null -eq $bridgeHealth) {
         throw "Unsupported authentication type: $authType"
     }
     Start-Process -FilePath $nodeExe -ArgumentList "`"$bridgeScript`"" -WindowStyle Hidden
-    if ($authType -eq "api_key") {
-        Remove-Item Env:OPENCODE_GO_API_KEY
+    if ($authType -eq "api_key" -or $authType -eq "none") {
+        Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:OPENCODE_GO_REASONING_EFFORT -ErrorAction SilentlyContinue
         $apiKey = $null
     }
     if ($authType -eq "codex_chatgpt") {
@@ -416,7 +428,7 @@ if ($null -ne $bridgeHealth) {
 }
 if ($null -eq $bridgeHealth -or $bridgeHealth.model -ne $model -or $bridgeHealth.endpoint -ne $endpoint -or
     $bridgeHealth.authType -ne $authType -or
-    ($authType -eq "codex_chatgpt" -and $bridgeHealth.reasoningEffort -ne $expectedReasoningEffort) -or
+    $bridgeHealth.reasoningEffort -ne $expectedReasoningEffort -or
     -not $authenticationReady) {
     throw "Accio model bridge health check failed"
 }
@@ -449,4 +461,4 @@ if (-not $BackendOnly) {
     }
 }
 
-Write-Output "Accio model API backend is ready: $authType / $model"
+Write-Output "Accio model API backend is ready: $authType / $model / $expectedReasoningEffort"
