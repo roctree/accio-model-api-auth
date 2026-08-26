@@ -27,6 +27,8 @@ function Get-ReasoningSummary([string]$reasoningEffort) {
         return "默认"
     }
     switch ($reasoningEffort) {
+        "default" { return "跟随模型" }
+        "enabled" { return "开启" }
         "disabled" { return "关闭" }
         "low" { return "低" }
         "medium" { return "中" }
@@ -56,7 +58,21 @@ function Get-CurrentModeSummary {
     }
     $reasoning = Get-ReasoningSummary $reasoningEffort
     $apiAuthentication = if ([string]$config.authType -eq "none") { "不使用 API Key" } else { "API Key" }
-    return "API / $([string]$config.model) / 思考$reasoning / $apiAuthentication"
+    $apiProvider = if ($null -ne $config.PSObject.Properties["apiProvider"]) {
+        [string]$config.apiProvider
+    } elseif ([string]$config.endpoint -like "https://ark.cn-beijing.volces.com/api/coding/v3*") {
+        "volcengine_coding_plan"
+    } elseif ([string]$config.endpoint -eq "https://opencode.ai/zen/go/v1/chat/completions") {
+        "opencode_go"
+    } else {
+        "custom_openai"
+    }
+    $providerName = switch ($apiProvider) {
+        "volcengine_coding_plan" { "火山 Coding Plan" }
+        "custom_openai" { "自定义 API" }
+        default { "OpenCode Go" }
+    }
+    return "$providerName / $([string]$config.model) / 思考$reasoning / $apiAuthentication"
 }
 
 function Update-TrayStatus {

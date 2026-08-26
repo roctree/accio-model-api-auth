@@ -8,10 +8,16 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$credentialTarget = "AccioOpenCodeGoApiKey"
+$openCodeCredentialTarget = "AccioOpenCodeGoApiKey"
+$volcengineCredentialTarget = "AccioVolcengineCodingPlanApiKey"
+$customApiCredentialTarget = "AccioCustomOpenAiApiKey"
 $localGatewayCredentialTarget = "AccioLocalGatewayPassword"
 $relayUrl = "http://127.0.0.1:18767"
 $bridgeUrl = "http://127.0.0.1:18765"
+$openCodeProvider = "opencode_go"
+$volcengineProvider = "volcengine_coding_plan"
+$customApiProvider = "custom_openai"
+$apiProvider = $openCodeProvider
 $model = "deepseek-v4-flash"
 $endpoint = "https://opencode.ai/zen/go/v1/chat/completions"
 $authType = "api_key"
@@ -31,6 +37,14 @@ if (Test-Path -LiteralPath $configPath) {
     $model = [string]$config.model
     $endpoint = [string]$config.endpoint
     $authType = [string]$config.authType
+    if ($null -ne $config.PSObject.Properties["apiProvider"] -and
+        -not [string]::IsNullOrWhiteSpace([string]$config.apiProvider)) {
+        $apiProvider = [string]$config.apiProvider
+    } elseif ($endpoint.StartsWith("https://ark.cn-beijing.volces.com/api/coding/v3", [StringComparison]::OrdinalIgnoreCase)) {
+        $apiProvider = $volcengineProvider
+    } elseif (-not [string]::Equals($endpoint, "https://opencode.ai/zen/go/v1/chat/completions", [StringComparison]::OrdinalIgnoreCase)) {
+        $apiProvider = $customApiProvider
+    }
     if ($null -ne $config.PSObject.Properties["reasoningEffort"]) {
         $reasoningEffort = [string]$config.reasoningEffort
     }
@@ -42,10 +56,22 @@ if (Test-Path -LiteralPath $configPath) {
         if ($null -ne $config.PSObject.Properties["openAiReasoningEffort"] -and
             -not [string]::IsNullOrWhiteSpace([string]$config.openAiReasoningEffort)) {
             $reasoningEffort = [string]$config.openAiReasoningEffort
+        } elseif ($apiProvider -eq $volcengineProvider) {
+            $reasoningEffort = "default"
         } else {
             $reasoningEffort = "high"
         }
     }
+}
+$credentialTarget = switch ($apiProvider) {
+    $volcengineProvider { $volcengineCredentialTarget }
+    $customApiProvider { $customApiCredentialTarget }
+    default { $openCodeCredentialTarget }
+}
+$apiProviderLabel = switch ($apiProvider) {
+    $volcengineProvider { "Volcengine Coding Plan" }
+    $customApiProvider { "Custom OpenAI-compatible API" }
+    default { "OpenCode Go" }
 }
 if ($authType -eq "codex_chatgpt") {
     $endpoint = "codex-app-server://local"
@@ -222,7 +248,7 @@ namespace AccioOpenCode {
                     CredentialBlobSize = (uint)blob.Length,
                     CredentialBlob = handle.AddrOfPinnedObject(),
                     Persist = CRED_PERSIST_LOCAL_MACHINE,
-                    UserName = "OpenCode Go"
+                    UserName = "Accio Model API"
                 };
                 if (!CredWrite(ref credential, 0)) {
                     throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -254,7 +280,7 @@ namespace AccioOpenCode {
 }
 
 if ($StoreCredential) {
-    $secureKey = Read-Host "OpenCode Go API Key" -AsSecureString
+    $secureKey = Read-Host "$apiProviderLabel API Key" -AsSecureString
     $keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
     try {
         $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
@@ -350,6 +376,7 @@ function Stop-BridgeProcess {
 $bridgeHealth = Get-Health "$bridgeUrl/healthz"
 $bridgeAuthType = ""
 $bridgeReasoningEffort = ""
+$bridgeApiProvider = ""
 if ($null -ne $bridgeHealth -and $null -ne $bridgeHealth.PSObject.Properties["authType"]) {
     $bridgeAuthType = [string]$bridgeHealth.authType
 }
@@ -357,11 +384,16 @@ $expectedReasoningEffort = if (-not [string]::IsNullOrWhiteSpace($reasoningEffor
 if ($null -ne $bridgeHealth -and $null -ne $bridgeHealth.PSObject.Properties["reasoningEffort"]) {
     $bridgeReasoningEffort = [string]$bridgeHealth.reasoningEffort
 }
+$usesApiBridge = $authType -eq "api_key" -or $authType -eq "none"
+if ($null -ne $bridgeHealth -and $null -ne $bridgeHealth.PSObject.Properties["provider"]) {
+    $bridgeApiProvider = [string]$bridgeHealth.provider
+}
 $bridgeConfigurationChanged = $null -ne $bridgeHealth -and (
     $bridgeHealth.model -ne $model -or
     $bridgeHealth.endpoint -ne $endpoint -or
     $bridgeAuthType -ne $authType -or
-    $bridgeReasoningEffort -ne $expectedReasoningEffort
+    $bridgeReasoningEffort -ne $expectedReasoningEffort -or
+    ($usesApiBridge -and $bridgeApiProvider -ne $apiProvider)
 )
 if ($null -ne $bridgeHealth -and ($RestartBridge -or $bridgeConfigurationChanged)) {
     Stop-BridgeProcess
@@ -378,14 +410,17 @@ if ($null -eq $bridgeHealth) {
         $env:OPENCODE_GO_ENDPOINT = $endpoint
         $env:OPENCODE_GO_REASONING_EFFORT = $reasoningEffort
         $env:ACCIO_MODEL_AUTH_TYPE = $authType
+        $env:ACCIO_API_PROVIDER = $apiProvider
     } elseif ($authType -eq "none") {
         Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
         $env:OPENCODE_GO_MODEL = $model
         $env:OPENCODE_GO_ENDPOINT = $endpoint
         $env:OPENCODE_GO_REASONING_EFFORT = $reasoningEffort
         $env:ACCIO_MODEL_AUTH_TYPE = $authType
+        $env:ACCIO_API_PROVIDER = $apiProvider
     } elseif ($authType -eq "codex_chatgpt") {
         Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:ACCIO_API_PROVIDER -ErrorAction SilentlyContinue
         $env:ACCIO_CODEX_EXE = Get-CodexExecutable
         $env:ACCIO_CODEX_MODEL = $model
         if ([string]::IsNullOrWhiteSpace($reasoningEffort)) {
@@ -401,6 +436,7 @@ if ($null -eq $bridgeHealth) {
     if ($authType -eq "api_key" -or $authType -eq "none") {
         Remove-Item Env:OPENCODE_GO_API_KEY -ErrorAction SilentlyContinue
         Remove-Item Env:OPENCODE_GO_REASONING_EFFORT -ErrorAction SilentlyContinue
+        Remove-Item Env:ACCIO_API_PROVIDER -ErrorAction SilentlyContinue
         $apiKey = $null
     }
     if ($authType -eq "codex_chatgpt") {
@@ -429,6 +465,7 @@ if ($null -ne $bridgeHealth) {
 if ($null -eq $bridgeHealth -or $bridgeHealth.model -ne $model -or $bridgeHealth.endpoint -ne $endpoint -or
     $bridgeHealth.authType -ne $authType -or
     $bridgeHealth.reasoningEffort -ne $expectedReasoningEffort -or
+    ($usesApiBridge -and $bridgeHealth.provider -ne $apiProvider) -or
     -not $authenticationReady) {
     throw "Accio model bridge health check failed"
 }
@@ -461,4 +498,4 @@ if (-not $BackendOnly) {
     }
 }
 
-Write-Output "Accio model API backend is ready: $authType / $model / $expectedReasoningEffort"
+Write-Output "Accio model API backend is ready: $authType / $apiProvider / $model / $expectedReasoningEffort"

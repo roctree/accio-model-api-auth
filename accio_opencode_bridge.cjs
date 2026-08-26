@@ -5,12 +5,20 @@ const PORT = Number(process.env.ACCIO_OPENCODE_PORT || 18765);
 const MODEL = process.env.OPENCODE_GO_MODEL || "deepseek-v4-flash";
 const ENDPOINT = process.env.OPENCODE_GO_ENDPOINT || "https://opencode.ai/zen/go/v1/chat/completions";
 const AUTH_TYPE = process.env.ACCIO_MODEL_AUTH_TYPE || "api_key";
-const REASONING_MODE = process.env.OPENCODE_GO_REASONING_EFFORT || "high";
+const API_PROVIDER = process.env.ACCIO_API_PROVIDER || "opencode_go";
+const REASONING_MODE = process.env.OPENCODE_GO_REASONING_EFFORT || (API_PROVIDER === "volcengine_coding_plan" ? "default" : "high");
 const ORIGINAL_GATEWAY = (process.env.ACCIO_ORIGINAL_GATEWAY_URL || "https://phoenix-gw.alibaba.com").replace(/\/+$/, "");
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const reasoningByToolCallId = new Map();
+let resolvedModel = MODEL;
 
-if (!["disabled", "low", "high", "max"].includes(REASONING_MODE)) {
+if (!["opencode_go", "volcengine_coding_plan", "custom_openai"].includes(API_PROVIDER)) {
+  throw new Error(`Unsupported API provider: ${API_PROVIDER}`);
+}
+const supportedReasoningModes = API_PROVIDER === "volcengine_coding_plan"
+  ? ["default", "enabled", "disabled"]
+  : ["disabled", "low", "high", "max"];
+if (!supportedReasoningModes.includes(REASONING_MODE)) {
   throw new Error(`Unsupported reasoning mode: ${REASONING_MODE}`);
 }
 
@@ -184,8 +192,12 @@ function toOpenAiRequest(payload) {
   if (maxTokens !== undefined) request.max_tokens = maxTokens;
   if (topP !== undefined) request.top_p = topP;
   if (Array.isArray(stop) && stop.length > 0) request.stop = stop;
-  request.thinking = { type: REASONING_MODE === "disabled" ? "disabled" : "enabled" };
-  if (REASONING_MODE !== "disabled") request.reasoning_effort = REASONING_MODE;
+  if (API_PROVIDER === "volcengine_coding_plan") {
+    if (REASONING_MODE !== "default") request.thinking = { type: REASONING_MODE };
+  } else {
+    request.thinking = { type: REASONING_MODE === "disabled" ? "disabled" : "enabled" };
+    if (REASONING_MODE !== "disabled") request.reasoning_effort = REASONING_MODE;
+  }
   if (tools.length > 0) {
     request.tools = tools;
     const toolChoice = openAiToolChoice(valueOf(payload, "toolChoice", "tool_choice"));
@@ -247,7 +259,7 @@ function usageMetadata(usage) {
 async function proxy(request, response, payload) {
   const apiKey = process.env.OPENCODE_GO_API_KEY;
   if (AUTH_TYPE === "api_key" && !apiKey) {
-    errorFrame(response, "CONFIG", "OPENCODE_GO_API_KEY is not set");
+    errorFrame(response, "CONFIG", "Model API Key is not set");
     return;
   }
   if (AUTH_TYPE !== "api_key" && AUTH_TYPE !== "none") {
@@ -293,6 +305,7 @@ async function proxy(request, response, payload) {
   let usage;
   let finishReason;
   let reasoningContent = "";
+  let responseModel = MODEL;
   for await (const data of sseData(upstream.body)) {
     if (data === "[DONE]") continue;
     let chunk;
@@ -302,6 +315,10 @@ async function proxy(request, response, payload) {
       continue;
     }
     responseId ||= chunk.id;
+    if (typeof chunk.model === "string" && chunk.model.trim()) {
+      responseModel = chunk.model.trim();
+      resolvedModel = responseModel;
+    }
     usage ||= usageMetadata(chunk.usage);
     const choice = chunk.choices?.[0];
     const delta = choice?.delta;
@@ -315,7 +332,7 @@ async function proxy(request, response, payload) {
         content: { role: "model", parts: [{ text: delta.content }] },
         partial: true,
         turnComplete: false,
-        customMetadata: { model: MODEL, reasoning_effort: REASONING_MODE, response_id: responseId },
+        customMetadata: { provider: API_PROVIDER, model: responseModel, reasoning_effort: REASONING_MODE, response_id: responseId },
       });
     }
     for (const call of Array.isArray(delta?.tool_calls) ? delta.tool_calls : []) {
@@ -355,7 +372,7 @@ async function proxy(request, response, payload) {
     turnComplete: true,
     finishReason: finishReason || "STOP",
     usageMetadata: usage,
-    customMetadata: { model: MODEL, reasoning_effort: REASONING_MODE, response_id: responseId },
+    customMetadata: { provider: API_PROVIDER, model: responseModel, reasoning_effort: REASONING_MODE, response_id: responseId },
   });
   response.end();
 }
@@ -416,7 +433,7 @@ async function forwardGateway(request, response) {
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/healthz") {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ ok: true, model: MODEL, endpoint: ENDPOINT, authType: AUTH_TYPE, reasoningEffort: REASONING_MODE, apiKeyConfigured: Boolean(process.env.OPENCODE_GO_API_KEY) }));
+    response.end(JSON.stringify({ ok: true, provider: API_PROVIDER, model: MODEL, resolvedModel, endpoint: ENDPOINT, authType: AUTH_TYPE, reasoningEffort: REASONING_MODE, apiKeyConfigured: Boolean(process.env.OPENCODE_GO_API_KEY) }));
     return;
   }
   if (request.url?.startsWith("/api/adk/llm/generateContent") && request.method === "POST") {
@@ -445,6 +462,7 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Accio model bridge listening on http://${HOST}:${PORT}`);
+  console.log(`provider=${API_PROVIDER}`);
   console.log(`model=${MODEL}`);
   console.log(`authType=${AUTH_TYPE}`);
   console.log(`reasoningEffort=${REASONING_MODE}`);

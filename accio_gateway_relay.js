@@ -79,13 +79,25 @@ function stripActualModelLabel(value) {
   return separatorIndex === -1 ? text : text.slice(separatorIndex + MODEL_LABEL_SEPARATOR.length).trim();
 }
 
+function providerDisplayName(provider) {
+  if (provider === "opencode_go") return "OpenCode Go";
+  if (provider === "volcengine_coding_plan") return "火山 Coding Plan";
+  if (provider === "custom_openai") return "自定义 API";
+  if (provider === "codex_chatgpt") return "Codex ChatGPT";
+  return typeof provider === "string" ? provider.trim() : "";
+}
+
 function applyActualModelLabel(snapshot, status) {
   if (!Array.isArray(snapshot.data) || !snapshot.ext || !Array.isArray(snapshot.ext.labelList)) {
     throw new Error("invalid Accio model catalog snapshot");
   }
-  const model = status.model.trim();
+  const model = typeof status.resolvedModel === "string" && status.resolvedModel.trim()
+    ? status.resolvedModel.trim()
+    : status.model.trim();
+  const provider = providerDisplayName(status.provider);
   const reasoningEffort = typeof status.reasoningEffort === "string" ? status.reasoningEffort.trim() : "";
-  const actualLabel = reasoningEffort ? `${model} · ${reasoningEffort}` : model;
+  const modelLabel = provider ? `${provider} · ${model}` : model;
+  const actualLabel = reasoningEffort ? `${modelLabel} · ${reasoningEffort}` : modelLabel;
   const decoratedModelCodes = new Set();
   for (const provider of snapshot.data) {
     if (!Array.isArray(provider.modelList)) continue;
