@@ -50,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File .\accio_config_ui.ps1
 - Codex ChatGPT 登录：登录状态、模型列表和思考强度由本机 Codex App Server 提供。
 - Accio 官方原生认证：不经过本地模型桥或路由网关，思考模式由 Accio 官方控制。
 
-OpenCode Go 与自定义 API 保留 DeepSeek 格式的“关闭、低、高（默认）、最高”：关闭发送 `thinking.type=disabled`；其余发送 `thinking.type=enabled` 与对应的 `reasoning_effort=low|high|max`。火山 Coding Plan 按官方兼容工具配置提供“跟随模型默认、开启、关闭”：跟随默认时不注入 `thinking`，开启或关闭时只发送对应的 `thinking.type`；`glm-5.3` 官方标明不能关闭思考，因此界面不会为它提供“关闭”。工具调用续轮会把模型上一轮返回的 `reasoning_content` 原样带回。
+OpenCode Go 与自定义 API 保留 DeepSeek 格式的“关闭、低、高、最高”：关闭发送 `thinking.type=disabled`；其余发送 `thinking.type=enabled` 与对应的 `reasoning_effort=low|high|max`。火山 Coding Plan 的“思考程度”会随模型变化，只显示已确认的档位：DeepSeek V4 Flash 支持低、高、最高，DeepSeek V4 Pro 支持高、最高，Doubao Seed 2.0 Lite 支持低、中、高，GLM 5.2/5.3 和 MiniMax M3 按各自能力显示；未确认能力的模型与 `ark-code-latest` 只提供“跟随模型默认”。选择具体档位时发送 `thinking.type=enabled` 与对应的 `reasoning_effort`，选择开关时只发送 `thinking.type`。工具调用续轮会把模型上一轮返回的 `reasoning_content` 原样带回。
 
 火山 Coding Plan 使用完整请求地址 `https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions`。不要改成普通方舟 `/api/v3`：普通地址不会消耗 Coding Plan 套餐额度，并可能产生额外 API 费用。模型预设依据当前官方列表，同时保留手动填写能力；最终可用模型以火山控制台为准。接口依据：[Coding Plan 套餐与支持模型](https://docs.volcengine.com/docs/82379/1925114?lang=zh) 和 [Coding Plan 常见问题](https://docs.volcengine.com/docs/82379/2165245?lang=zh)。
 

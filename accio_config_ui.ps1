@@ -249,7 +249,7 @@ $modelComboBox.AutoCompleteSource = "ListItems"
 $form.Controls.Add($modelComboBox)
 
 $reasoningEffortLabel = New-Object System.Windows.Forms.Label
-$reasoningEffortLabel.Text = "思考模式"
+$reasoningEffortLabel.Text = "思考程度"
 $reasoningEffortLabel.Location = New-Object System.Drawing.Point(300, 310)
 $reasoningEffortLabel.Size = New-Object System.Drawing.Size(120, 22)
 $form.Controls.Add($reasoningEffortLabel)
@@ -360,6 +360,31 @@ function Get-ApiCredentialTarget([string]$apiProvider) {
     }
 }
 
+function Get-VolcengineReasoningEfforts([string]$model) {
+    switch ($model.Trim().ToLowerInvariant()) {
+        "deepseek-v4-flash" { return @("default", "disabled", "enabled", "low", "high", "max") }
+        "deepseek-v4-pro" { return @("default", "disabled", "enabled", "high", "max") }
+        "doubao-seed-2.0-lite" { return @("default", "disabled", "enabled", "low", "medium", "high") }
+        "glm-5.3" { return @("default", "low", "high", "max") }
+        "glm-5.2" { return @("default", "high", "max") }
+        "minimax-m3" { return @("default", "disabled", "enabled") }
+        default { return @("default") }
+    }
+}
+
+function Get-ReasoningEffortDisplayName([string]$reasoningEffort) {
+    switch ($reasoningEffort) {
+        "default" { return "跟随模型默认" }
+        "disabled" { return "关闭" }
+        "enabled" { return "开启（默认）" }
+        "low" { return "低" }
+        "medium" { return "中" }
+        "high" { return "高" }
+        "max" { return "最高" }
+        default { throw "不支持的思考程度：$reasoningEffort" }
+    }
+}
+
 function Get-ApiProviderSettings([string]$apiProvider) {
     switch ($apiProvider) {
         $volcengineProvider {
@@ -390,19 +415,16 @@ function Get-ApiProviderSettings([string]$apiProvider) {
 }
 
 function Get-ApiReasoningEffort([string]$apiProvider) {
-    if ($apiProvider -eq $volcengineProvider) {
-        switch ($reasoningEffortComboBox.Text) {
-            "开启" { return "enabled" }
-            "关闭" { return "disabled" }
-            default { return "default" }
-        }
-    }
-    switch ($reasoningEffortComboBox.SelectedIndex) {
-        0 { return "disabled" }
-        1 { return "low" }
-        2 { return "high" }
-        3 { return "max" }
-        default { return "high" }
+    switch ($reasoningEffortComboBox.Text) {
+        "跟随模型默认" { return "default" }
+        "关闭" { return "disabled" }
+        "开启（默认）" { return "enabled" }
+        "低" { return "low" }
+        "中" { return "medium" }
+        "高" { return "high" }
+        "高（默认）" { return "high" }
+        "最高" { return "max" }
+        default { throw "请选择有效的思考程度" }
     }
 }
 
@@ -459,35 +481,24 @@ function Update-ApiReasoningEfforts([string]$preferredEffort = "high") {
     $reasoningEffortComboBox.BeginUpdate()
     try {
         $reasoningEffortComboBox.Items.Clear()
-        if ((Get-SelectedApiProvider) -eq $volcengineProvider) {
-            [void]$reasoningEffortComboBox.Items.Add("跟随模型默认")
-            [void]$reasoningEffortComboBox.Items.Add("开启")
-            if ($modelComboBox.Text -ne "glm-5.3") {
-                [void]$reasoningEffortComboBox.Items.Add("关闭")
-            }
-            switch ($preferredEffort) {
-                "enabled" { $reasoningEffortComboBox.SelectedItem = "开启" }
-                "disabled" {
-                    if ($reasoningEffortComboBox.Items.Contains("关闭")) {
-                        $reasoningEffortComboBox.SelectedItem = "关闭"
-                    } else {
-                        $reasoningEffortComboBox.SelectedItem = "跟随模型默认"
-                    }
-                }
-                default { $reasoningEffortComboBox.SelectedItem = "跟随模型默认" }
-            }
-            return
+        $reasoningEfforts = if ((Get-SelectedApiProvider) -eq $volcengineProvider) {
+            @(Get-VolcengineReasoningEfforts $modelComboBox.Text)
+        } else {
+            @("disabled", "low", "high", "max")
         }
-        [void]$reasoningEffortComboBox.Items.Add("关闭")
-        [void]$reasoningEffortComboBox.Items.Add("低")
-        [void]$reasoningEffortComboBox.Items.Add("高（默认）")
-        [void]$reasoningEffortComboBox.Items.Add("最高")
-        switch ($preferredEffort) {
-            "disabled" { $reasoningEffortComboBox.SelectedIndex = 0 }
-            "low" { $reasoningEffortComboBox.SelectedIndex = 1 }
-            "max" { $reasoningEffortComboBox.SelectedIndex = 3 }
-            default { $reasoningEffortComboBox.SelectedIndex = 2 }
+        foreach ($reasoningEffort in $reasoningEfforts) {
+            [void]$reasoningEffortComboBox.Items.Add((Get-ReasoningEffortDisplayName $reasoningEffort))
         }
+        $selectedEffort = if ($reasoningEfforts -contains $preferredEffort) {
+            $preferredEffort
+        } elseif ($reasoningEfforts -contains "high") {
+            "high"
+        } elseif ($reasoningEfforts -contains "default") {
+            "default"
+        } else {
+            $reasoningEfforts[0]
+        }
+        $reasoningEffortComboBox.SelectedItem = Get-ReasoningEffortDisplayName $selectedEffort
     } finally {
         $reasoningEffortComboBox.EndUpdate()
     }
@@ -928,7 +939,7 @@ if (Test-Path -LiteralPath $configPath) {
         if (-not [string]::IsNullOrWhiteSpace($legacyApiModel)) {
             $lastVolcengineModel = $legacyApiModel
         }
-        if (@("default", "enabled", "disabled") -contains $legacyApiReasoningEffort) {
+        if (@("default", "enabled", "disabled", "low", "medium", "high", "max") -contains $legacyApiReasoningEffort) {
             $lastVolcengineReasoningEffort = $legacyApiReasoningEffort
         }
     } elseif ($lastApiProvider -eq $customApiProvider -and $null -eq $config.PSObject.Properties["customEndpoint"]) {

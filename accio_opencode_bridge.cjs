@@ -12,11 +12,20 @@ const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const reasoningByToolCallId = new Map();
 let resolvedModel = MODEL;
 
+const volcengineReasoningModesByModel = new Map([
+  ["deepseek-v4-flash", ["default", "disabled", "enabled", "low", "high", "max"]],
+  ["deepseek-v4-pro", ["default", "disabled", "enabled", "high", "max"]],
+  ["doubao-seed-2.0-lite", ["default", "disabled", "enabled", "low", "medium", "high"]],
+  ["glm-5.3", ["default", "low", "high", "max"]],
+  ["glm-5.2", ["default", "high", "max"]],
+  ["minimax-m3", ["default", "disabled", "enabled"]],
+]);
+
 if (!["opencode_go", "volcengine_coding_plan", "custom_openai"].includes(API_PROVIDER)) {
   throw new Error(`Unsupported API provider: ${API_PROVIDER}`);
 }
 const supportedReasoningModes = API_PROVIDER === "volcengine_coding_plan"
-  ? ["default", "enabled", "disabled"]
+  ? volcengineReasoningModesByModel.get(MODEL.toLowerCase()) || ["default"]
   : ["disabled", "low", "high", "max"];
 if (!supportedReasoningModes.includes(REASONING_MODE)) {
   throw new Error(`Unsupported reasoning mode: ${REASONING_MODE}`);
@@ -193,7 +202,12 @@ function toOpenAiRequest(payload) {
   if (topP !== undefined) request.top_p = topP;
   if (Array.isArray(stop) && stop.length > 0) request.stop = stop;
   if (API_PROVIDER === "volcengine_coding_plan") {
-    if (REASONING_MODE !== "default") request.thinking = { type: REASONING_MODE };
+    if (["enabled", "disabled"].includes(REASONING_MODE)) {
+      request.thinking = { type: REASONING_MODE };
+    } else if (REASONING_MODE !== "default") {
+      request.thinking = { type: "enabled" };
+      request.reasoning_effort = REASONING_MODE;
+    }
   } else {
     request.thinking = { type: REASONING_MODE === "disabled" ? "disabled" : "enabled" };
     if (REASONING_MODE !== "disabled") request.reasoning_effort = REASONING_MODE;
