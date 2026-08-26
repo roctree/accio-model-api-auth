@@ -14,6 +14,9 @@ const LOCAL_GATEWAY_AUTH = LOCAL_GATEWAY_PASSWORD
   ? `Basic ${Buffer.from(`${LOCAL_GATEWAY_USERNAME}:${LOCAL_GATEWAY_PASSWORD}`).toString("base64")}`
   : "";
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const MODEL_RETRY_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const MODEL_RETRY_ATTEMPTS = Math.max(1, Number(process.env.ACCIO_RELAY_RETRY_ATTEMPTS || 5));
+const MODEL_RETRY_DELAY_MS = Math.max(0, Number(process.env.ACCIO_RELAY_RETRY_DELAY_MS || 3000));
 const LOG_PATH = process.env.ACCIO_RELAY_LOG || "";
 const MODEL_CATALOG_PATH = "/api/llm/config/v2";
 const MODEL_CACHE_PATH = path.join(os.homedir(), ".accio", "model_cache.json");
@@ -134,6 +137,29 @@ async function serveModelCatalog(request, response) {
   response.end(JSON.stringify(catalog.snapshot));
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function fetchWithModelRetry(targetUrl, options, shouldRetry) {
+  const attempts = shouldRetry ? MODEL_RETRY_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const upstream = await fetch(targetUrl, options);
+      if (!shouldRetry || !MODEL_RETRY_STATUSES.has(upstream.status) || attempt === attempts) {
+        return upstream;
+      }
+      await upstream.body?.cancel();
+      logRoute(`retry ${options.method} ${targetUrl} status=${upstream.status} attempt=${attempt}/${attempts}`);
+    } catch (error) {
+      if (!shouldRetry || attempt === attempts) throw error;
+      logRoute(`retry ${options.method} ${targetUrl} error=${error?.message || String(error)} attempt=${attempt}/${attempts}`);
+    }
+    if (MODEL_RETRY_DELAY_MS > 0) await sleep(MODEL_RETRY_DELAY_MS);
+  }
+  throw new Error("model retry exhausted");
+}
+
 async function forward(request, response, baseUrl) {
   const incomingUrl = new URL(request.url || "/", `http://${HOST}:${PORT}`);
   const targetUrl = `${baseUrl}${incomingUrl.pathname}${incomingUrl.search}`;
@@ -147,7 +173,7 @@ async function forward(request, response, baseUrl) {
   const body = ["GET", "HEAD"].includes(request.method || "GET") ? undefined : await readBody(request);
   let upstream;
   try {
-    upstream = await fetch(targetUrl, { method: request.method, headers, body });
+    upstream = await fetchWithModelRetry(targetUrl, { method: request.method, headers, body }, baseUrl === MODEL_BRIDGE);
   } catch (error) {
     logRoute(`error ${request.method} ${incomingUrl.pathname} -> ${baseUrl} ${error?.message || String(error)}`);
     response.writeHead(502, { "Content-Type": "application/json" });
