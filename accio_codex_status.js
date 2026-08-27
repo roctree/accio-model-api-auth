@@ -29,12 +29,64 @@ class Client {
       this.request("model/list", { limit: 100, includeHidden: false }),
       this.request("modelProvider/capabilities/read", {}),
     ]);
+    const authenticated = account?.account?.type === "chatgpt";
+    let rateLimits = [];
+    let rateLimitsError = null;
+    let rateLimitResetCredits = null;
+    let usageSummary = null;
+    let dailyUsageBuckets = null;
+    let usageError = null;
+
+    if (authenticated) {
+      const [rateLimitsResult, usageResult] = await Promise.allSettled([
+        this.request("account/rateLimits/read"),
+        this.request("account/usage/read"),
+      ]);
+
+      if (rateLimitsResult.status === "fulfilled") {
+        const response = rateLimitsResult.value;
+        const limitsById = response?.rateLimitsByLimitId;
+        const limits = limitsById && typeof limitsById === "object"
+          ? Object.values(limitsById)
+          : response?.rateLimits
+            ? [response.rateLimits]
+            : [];
+        rateLimits = limits.map((limit) => ({
+          limitId: limit?.limitId || "",
+          limitName: limit?.limitName || "",
+          planType: limit?.planType || "",
+          primary: normalizeRateLimitWindow(limit?.primary),
+          secondary: normalizeRateLimitWindow(limit?.secondary),
+          credits: limit?.credits || null,
+          rateLimitReachedType: limit?.rateLimitReachedType || null,
+        }));
+        rateLimitResetCredits = response?.rateLimitResetCredits || null;
+      } else {
+        rateLimitsError = rateLimitsResult.reason?.message || String(rateLimitsResult.reason);
+      }
+
+      if (usageResult.status === "fulfilled") {
+        usageSummary = usageResult.value?.summary || null;
+        dailyUsageBuckets = Array.isArray(usageResult.value?.dailyUsageBuckets)
+          ? usageResult.value.dailyUsageBuckets
+          : null;
+      } else {
+        usageError = usageResult.reason?.message || String(usageResult.reason);
+      }
+    }
+
     return {
-      authenticated: account?.account?.type === "chatgpt",
+      authenticated,
       accountType: account?.account?.type || null,
-      planType: account?.account?.type === "chatgpt" ? account.account.planType : null,
+      planType: authenticated ? account.account.planType : null,
       requiresOpenaiAuth: Boolean(account?.requiresOpenaiAuth),
       imageGenerationAvailable: Boolean(providerCapabilities?.imageGeneration),
+      rateLimits,
+      rateLimitsError,
+      rateLimitResetCredits,
+      usageSummary,
+      dailyUsageBuckets,
+      usageError,
       models: (Array.isArray(models?.data) ? models.data : []).map((item) => ({
         id: item.id || item.model || item.slug || "",
         displayName: item.displayName || item.name || item.id || item.model || item.slug || "",
@@ -82,7 +134,9 @@ class Client {
         reject(new Error(`${method} timed out`));
       }, 30000);
       this.pending.set(String(id), { resolve, reject, timer });
-      this.send({ id, method, params });
+      const message = { id, method };
+      if (params !== undefined) message.params = params;
+      this.send(message);
     });
   }
 
@@ -97,6 +151,15 @@ class Client {
   stop() {
     if (this.child && !this.child.killed) this.child.kill();
   }
+}
+
+function normalizeRateLimitWindow(window) {
+  if (!window) return null;
+  return {
+    usedPercent: window.usedPercent ?? null,
+    windowDurationMins: window.windowDurationMins ?? null,
+    resetsAt: window.resetsAt ?? null,
+  };
 }
 
 (async () => {
