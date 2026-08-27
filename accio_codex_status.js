@@ -20,17 +20,21 @@ class Client {
     this.child.on("error", (error) => this.fail(error));
     this.child.on("exit", (code, signal) => this.fail(new Error(`Codex App Server exited (${code ?? signal})`)));
     await this.request("initialize", {
-      clientInfo: { name: "accio-model-api-auth-status", title: "Accio Codex Status", version: "0.3.0" },
+      clientInfo: { name: "accio-model-api-auth-status", title: "Accio Codex Status", version: "0.4.0" },
       capabilities: { experimentalApi: true },
     });
     this.send({ method: "initialized", params: {} });
-    const account = await this.request("account/read", { refreshToken: false });
-    const models = await this.request("model/list", { limit: 100, includeHidden: false });
+    const [account, models, providerCapabilities] = await Promise.all([
+      this.request("account/read", { refreshToken: false }),
+      this.request("model/list", { limit: 100, includeHidden: false }),
+      this.request("modelProvider/capabilities/read", {}),
+    ]);
     return {
       authenticated: account?.account?.type === "chatgpt",
       accountType: account?.account?.type || null,
       planType: account?.account?.type === "chatgpt" ? account.account.planType : null,
       requiresOpenaiAuth: Boolean(account?.requiresOpenaiAuth),
+      imageGenerationAvailable: Boolean(providerCapabilities?.imageGeneration),
       models: (Array.isArray(models?.data) ? models.data : []).map((item) => ({
         id: item.id || item.model || item.slug || "",
         displayName: item.displayName || item.name || item.id || item.model || item.slug || "",

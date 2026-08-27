@@ -7,6 +7,7 @@ const HOST = "127.0.0.1";
 const PORT = Number(process.env.ACCIO_RELAY_PORT || 18766);
 const ORIGINAL_GATEWAY = "https://phoenix-gw.alibaba.com";
 const MODEL_BRIDGE = "http://127.0.0.1:18765";
+const IMAGE_BRIDGE = (process.env.ACCIO_IMAGE_BRIDGE_URL || "").trim();
 const LOCAL_GATEWAY = "http://127.0.0.1:4097";
 const LOCAL_GATEWAY_USERNAME = "phoenix";
 const LOCAL_GATEWAY_PASSWORD = process.env.ACCIO_LOCAL_GATEWAY_PASSWORD || "accio-local-7c9f5a4d-2e61-4b87-a0d3-6f4c9182be75";
@@ -134,7 +135,7 @@ async function serveModelCatalog(request, response) {
   response.end(JSON.stringify(catalog.snapshot));
 }
 
-async function forward(request, response, baseUrl) {
+async function forward(request, response, baseUrl, bodyOverride) {
   const incomingUrl = new URL(request.url || "/", `http://${HOST}:${PORT}`);
   const targetUrl = `${baseUrl}${incomingUrl.pathname}${incomingUrl.search}`;
   logRoute(`forward ${request.method} ${incomingUrl.pathname} -> ${baseUrl}`);
@@ -144,7 +145,7 @@ async function forward(request, response, baseUrl) {
     if (value !== undefined) headers[name] = Array.isArray(value) ? value.join(", ") : value;
   }
   if (baseUrl === LOCAL_GATEWAY && LOCAL_GATEWAY_AUTH) headers.authorization = LOCAL_GATEWAY_AUTH;
-  const body = ["GET", "HEAD"].includes(request.method || "GET") ? undefined : await readBody(request);
+  const body = ["GET", "HEAD"].includes(request.method || "GET") ? undefined : bodyOverride ?? await readBody(request);
   let upstream;
   try {
     upstream = await fetch(targetUrl, { method: request.method, headers, body });
@@ -165,6 +166,13 @@ async function forward(request, response, baseUrl) {
     for await (const chunk of upstream.body) response.write(chunk);
   }
   response.end();
+}
+
+function isImageGenerationPayload(payload) {
+  const generationConfig = payload?.generationConfig ?? payload?.generation_config;
+  const responseModalities = generationConfig?.responseModalities ?? generationConfig?.response_modalities;
+  return Array.isArray(responseModalities)
+    && responseModalities.some((modality) => String(modality).trim().toUpperCase() === "IMAGE");
 }
 
 function isHistoryRead(requestUrl, method) {
@@ -214,7 +222,7 @@ function isOriginalRuntimeRequest(requestUrl) {
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/healthz") {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ ok: true, modelBridge: MODEL_BRIDGE, originalGateway: ORIGINAL_GATEWAY }));
+    response.end(JSON.stringify({ ok: true, modelBridge: MODEL_BRIDGE, imageBridge: IMAGE_BRIDGE || null, originalGateway: ORIGINAL_GATEWAY }));
     return;
   }
   const pathname = new URL(request.url || "/", `http://${HOST}:${PORT}`).pathname;
@@ -243,10 +251,29 @@ const server = http.createServer(async (request, response) => {
     response.end("not found");
     return;
   }
-  const target = isModelRequest ? MODEL_BRIDGE : isLocalRequest ? LOCAL_GATEWAY : ORIGINAL_GATEWAY;
+  let modelBody;
+  let imageGenerationRequest = false;
+  if (isModelRequest) {
+    try {
+      modelBody = await readBody(request);
+      imageGenerationRequest = isImageGenerationPayload(JSON.parse(modelBody.toString("utf8")));
+    } catch (error) {
+      response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: "ACCIO_MODEL_REQUEST", message: error?.message || String(error) }));
+      return;
+    }
+  }
+  if (imageGenerationRequest && !IMAGE_BRIDGE) {
+    response.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({ error: "ACCIO_IMAGE_PROVIDER_DISABLED", message: "Codex subscription image generation is not enabled" }));
+    return;
+  }
+  const target = isModelRequest
+    ? (imageGenerationRequest ? IMAGE_BRIDGE : MODEL_BRIDGE)
+    : (isLocalRequest ? LOCAL_GATEWAY : ORIGINAL_GATEWAY);
   logRoute(`route ${request.method} ${pathname} = ${target}`);
   try {
-    await forward(request, response, target);
+    await forward(request, response, target, modelBody);
   } catch (error) {
     if (!response.writableEnded) {
       response.writeHead(502, { "Content-Type": "application/json" });

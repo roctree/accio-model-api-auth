@@ -8,8 +8,11 @@ const MODEL = process.env.ACCIO_CODEX_MODEL || "gpt-5.6-sol";
 const REASONING_EFFORT = process.env.ACCIO_CODEX_REASONING_EFFORT || "";
 const CODEX_EXE = process.env.ACCIO_CODEX_EXE || "codex";
 const CODEX_CWD = process.env.ACCIO_CODEX_CWD || process.cwd();
+const IMAGE_ONLY = /^(1|true|yes)$/i.test(process.env.ACCIO_CODEX_IMAGE_ONLY || "");
+const IMAGE_MODEL = process.env.ACCIO_CODEX_IMAGE_MODEL || "gpt-image-2";
+const DEBUG = /^(1|true|yes)$/i.test(process.env.ACCIO_CODEX_DEBUG || "");
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
-const BRIDGE_VERSION = "0.3.0";
+const BRIDGE_VERSION = "0.4.0";
 
 function valueOf(object, camel, snake) {
   return object?.[camel] ?? object?.[snake];
@@ -107,7 +110,25 @@ function imageInputFromPart(part) {
   return url ? { type: "image", url } : null;
 }
 
-function conversationInputs(payload) {
+function imageGenerationDirective(payload) {
+  const generationConfig = valueOf(payload, "generationConfig", "generation_config") || {};
+  const imageConfig = valueOf(generationConfig, "imageConfig", "image_config") || {};
+  const aspectRatio = valueOf(imageConfig, "aspectRatio", "aspect_ratio");
+  const layoutSize = valueOf(imageConfig, "layoutSize", "layout_size");
+  const imageSize = valueOf(imageConfig, "imageSize", "image_size");
+  const details = [];
+  if (aspectRatio) details.push(`aspect ratio ${aspectRatio}`);
+  if (layoutSize) details.push(`canvas size ${layoutSize}`);
+  if (imageSize) details.push(`image size ${imageSize}`);
+  return [
+    "$imagegen",
+    "Generate or edit exactly one image from the latest user request and attached reference images.",
+    details.length > 0 ? `Honor the requested ${details.join(", ")}.` : "",
+    "Return the generated image, not a text-only description.",
+  ].filter(Boolean).join("\n");
+}
+
+function conversationInputs(payload, imageOnly = false) {
   const inputs = [];
   const transcript = [];
   for (const content of Array.isArray(payload?.contents) ? payload.contents : []) {
@@ -127,8 +148,21 @@ function conversationInputs(payload) {
   const text = transcript.length > 0
     ? `Accio conversation transcript, oldest to newest:\n${transcript.join("\n")}`
     : "Continue the Accio conversation.";
-  inputs.unshift({ type: "text", text });
+  inputs.unshift({ type: "text", text: imageOnly ? `${imageGenerationDirective(payload)}\n\n${text}` : text });
   return inputs;
+}
+
+function imagePartFromItem(item) {
+  const result = typeof item?.result === "string" ? item.result.trim() : "";
+  if (!result) return null;
+  const dataUrl = /^data:([^;,]+);base64,([\s\S]+)$/i.exec(result);
+  const data = dataUrl ? dataUrl[2] : result;
+  let mimeType = dataUrl ? dataUrl[1] : "image/png";
+  if (!dataUrl) {
+    if (data.startsWith("/9j/")) mimeType = "image/jpeg";
+    else if (data.startsWith("UklGR")) mimeType = "image/webp";
+  }
+  return { inlineData: { mimeType, data } };
 }
 
 function toolChoiceInstruction(payload) {
@@ -154,7 +188,11 @@ function endWithError(response, code, message) {
     partial: false,
     errorCode: String(code),
     errorMessage: String(message),
-    customMetadata: { model: MODEL, reasoning_effort: REASONING_EFFORT || "default", provider: "codex_chatgpt" },
+    customMetadata: {
+      model: IMAGE_ONLY ? IMAGE_MODEL : MODEL,
+      reasoning_effort: IMAGE_ONLY ? "default" : REASONING_EFFORT || "default",
+      provider: IMAGE_ONLY ? "codex_chatgpt_image" : "codex_chatgpt",
+    },
   });
   response.end();
 }
@@ -192,6 +230,7 @@ class CodexAppServer extends EventEmitter {
     this.account = null;
     this.requiresOpenaiAuth = true;
     this.models = [];
+    this.providerCapabilities = { imageGeneration: false };
     this.ready = false;
     this.startError = null;
   }
@@ -289,11 +328,15 @@ class CodexAppServer extends EventEmitter {
   }
 
   async refreshStatus() {
-    const account = await this.request("account/read", { refreshToken: false });
-    const models = await this.request("model/list", { limit: 100, includeHidden: false });
+    const [account, models, providerCapabilities] = await Promise.all([
+      this.request("account/read", { refreshToken: false }),
+      this.request("model/list", { limit: 100, includeHidden: false }),
+      this.request("modelProvider/capabilities/read", {}),
+    ]);
     this.account = account?.account || null;
     this.requiresOpenaiAuth = Boolean(account?.requiresOpenaiAuth);
     this.models = Array.isArray(models?.data) ? models.data : [];
+    this.providerCapabilities = providerCapabilities || { imageGeneration: false };
     return this.publicStatus();
   }
 
@@ -304,6 +347,7 @@ class CodexAppServer extends EventEmitter {
       accountType: this.account?.type || null,
       planType: this.account?.type === "chatgpt" ? this.account.planType : null,
       requiresOpenaiAuth: this.requiresOpenaiAuth,
+      imageGenerationAvailable: Boolean(this.providerCapabilities?.imageGeneration),
       model: MODEL,
       reasoningEffort: REASONING_EFFORT || "default",
       models: this.models.map((item) => ({
@@ -335,6 +379,7 @@ class TurnContext {
     this.turnId = "";
     this.pendingCalls = new Map();
     this.toolFlushTimer = null;
+    this.imageItem = null;
     this.finished = false;
     this.attachedPromise = this.attach(response);
   }
@@ -362,13 +407,18 @@ class TurnContext {
   }
 
   delta(text) {
-    if (!text || !this.response || this.response.writableEnded) return;
+    if (IMAGE_ONLY || !text || !this.response || this.response.writableEnded) return;
     sendFrame(this.response, {
       content: { role: "model", parts: [{ text }] },
       partial: true,
       turnComplete: false,
       customMetadata: { model: MODEL, reasoning_effort: REASONING_EFFORT || "default", provider: "codex_chatgpt", thread_id: this.threadId, turn_id: this.turnId },
     });
+  }
+
+  recordCompletedItem(item) {
+    if (!IMAGE_ONLY || item?.type !== "imageGeneration") return;
+    this.imageItem = item;
   }
 
   addToolCall(rpcId, params) {
@@ -418,6 +468,21 @@ class TurnContext {
     if (response && !response.writableEnded) {
       if (turn?.status === "failed") {
         endWithError(response, "CODEX_TURN_FAILED", turn?.error?.message || "Codex turn failed");
+      } else if (IMAGE_ONLY) {
+        const imagePart = imagePartFromItem(this.imageItem);
+        if (!imagePart) {
+          const failure = this.imageItem?.failure ? JSON.stringify(this.imageItem.failure) : "no image result";
+          endWithError(response, "CODEX_IMAGE_GENERATION", `Codex image generation failed: ${failure}`);
+        } else {
+          sendFrame(response, {
+            content: { role: "model", parts: [imagePart] },
+            partial: false,
+            turnComplete: true,
+            finishReason: "STOP",
+            customMetadata: { model: IMAGE_MODEL, controller_model: MODEL, provider: "codex_chatgpt", thread_id: this.threadId, turn_id: this.turnId },
+          });
+          response.end();
+        }
       } else {
         sendFrame(response, {
           content: { role: "model", parts: [] },
@@ -448,7 +513,29 @@ const codex = new CodexAppServer();
 const turnContexts = new Map();
 const pendingToolCalls = new Map();
 
+function debugProtocolMessage(message) {
+  if (!DEBUG) return;
+  const params = message?.params || {};
+  const item = params.item;
+  const summary = {
+    method: message?.method || "",
+    threadId: params.threadId || "",
+    turnId: params.turnId || params.turn?.id || "",
+    turnStatus: params.turn?.status || "",
+    item: item ? {
+      id: item.id || "",
+      type: item.type || "",
+      status: item.status || "",
+      resultLength: typeof item.result === "string" ? item.result.length : 0,
+      savedPath: item.savedPath || "",
+      failure: item.failure || null,
+    } : null,
+  };
+  console.log(`[codex-protocol] ${JSON.stringify(summary)}`);
+}
+
 codex.on("serverRequest", (message) => {
+  debugProtocolMessage(message);
   if (message.method !== "item/tool/call") {
     codex.respondError(message.id, -32601, `Unsupported Codex server request: ${message.method}`);
     const context = turnContexts.get(message.params?.threadId);
@@ -460,14 +547,24 @@ codex.on("serverRequest", (message) => {
     codex.respond(message.id, { success: false, contentItems: [{ type: "inputText", text: "Accio turn is no longer available" }] });
     return;
   }
+  if (IMAGE_ONLY) {
+    codex.respond(message.id, { success: false, contentItems: [{ type: "inputText", text: "Dynamic tools are disabled for image generation" }] });
+    context.fail("CODEX_IMAGE_TOOL", "Codex image generation requested an unexpected dynamic tool");
+    return;
+  }
   context.addToolCall(message.id, message.params || {});
 });
 
 codex.on("notification", (message) => {
+  debugProtocolMessage(message);
   const params = message.params || {};
   const context = turnContexts.get(params.threadId);
   if (message.method === "item/agentMessage/delta") {
     context?.delta(params.delta);
+    return;
+  }
+  if (message.method === "item/completed") {
+    context?.recordCompletedItem(params.item);
     return;
   }
   if (message.method === "turn/completed") {
@@ -524,6 +621,9 @@ async function startTurn(response, payload) {
     const systemInstruction = textFromInstruction(valueOf(payload, "systemInstruction", "system_instruction"));
     const choiceInstruction = toolChoiceInstruction(payload);
     const developerInstructions = [systemInstruction, choiceInstruction].filter(Boolean).join("\n\n") || null;
+    const baseInstructions = IMAGE_ONLY
+      ? "You are the image generation backend inside Accio. Every turn is an image generation or image editing request. Invoke the built-in image generation capability exactly once. Do not call shell, file, web, MCP, dynamic, computer, or sub-agent tools. Do not answer with a text-only description and do not mention this bridge."
+      : "You are the language model inside Accio. Follow the supplied Accio system instruction and conversation. Answer directly. You may call only dynamic tools supplied by Accio. Never call Codex built-in shell, file, web, MCP, skill, computer, or sub-agent tools. Do not mention this bridge or its protocol unless the user asks.";
     const threadResult = await codex.request("thread/start", {
       model: MODEL,
       cwd: CODEX_CWD,
@@ -531,17 +631,17 @@ async function startTurn(response, payload) {
       sandbox: "read-only",
       ephemeral: true,
       allowProviderModelFallback: false,
-      baseInstructions: "You are the language model inside Accio. Follow the supplied Accio system instruction and conversation. Answer directly. You may call only dynamic tools supplied by Accio. Never call Codex built-in shell, file, web, MCP, skill, computer, or sub-agent tools. Do not mention this bridge or its protocol unless the user asks.",
+      baseInstructions,
       developerInstructions,
-      dynamicTools: dynamicToolsFromPayload(payload),
+      dynamicTools: IMAGE_ONLY ? [] : dynamicToolsFromPayload(payload),
     });
     context.threadId = threadResult?.thread?.id || "";
     if (!context.threadId) throw new Error("Codex thread/start returned no thread id");
     turnContexts.set(context.threadId, context);
     const turnResult = await codex.request("turn/start", {
       threadId: context.threadId,
-      input: conversationInputs(payload),
-      ...(REASONING_EFFORT ? { effort: REASONING_EFFORT } : {}),
+      input: conversationInputs(payload, IMAGE_ONLY),
+      ...(!IMAGE_ONLY && REASONING_EFFORT ? { effort: REASONING_EFFORT } : {}),
     });
     context.turnId = turnResult?.turn?.id || "";
     await context.attachedPromise;
@@ -554,6 +654,7 @@ async function startTurn(response, payload) {
 async function generate(response, payload) {
   if (!codex.ready) throw codex.startError || new Error("Codex App Server is not ready");
   if (codex.account?.type !== "chatgpt") throw new Error("Codex is not logged in with ChatGPT");
+  if (IMAGE_ONLY && !codex.providerCapabilities?.imageGeneration) throw new Error("Codex image generation is not available for the current ChatGPT account");
   const matches = matchPendingResponses(payload);
   if (matches.length > 0) await continueToolTurn(response, matches);
   else await startTurn(response, payload);
@@ -567,17 +668,20 @@ function jsonResponse(response, status, value) {
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/healthz") {
     if (!codex.ready) {
-      jsonResponse(response, 503, { ok: false, provider: "codex_chatgpt", model: MODEL, reasoningEffort: REASONING_EFFORT || "default", error: codex.startError?.message || "starting" });
+      jsonResponse(response, 503, { ok: false, provider: IMAGE_ONLY ? "codex_chatgpt_image" : "codex_chatgpt", model: IMAGE_ONLY ? IMAGE_MODEL : MODEL, controllerModel: MODEL, imageOnly: IMAGE_ONLY, reasoningEffort: IMAGE_ONLY ? "default" : REASONING_EFFORT || "default", error: codex.startError?.message || "starting" });
       return;
     }
     const status = codex.publicStatus();
     jsonResponse(response, 200, {
       ok: true,
-      provider: "codex_chatgpt",
+      provider: IMAGE_ONLY ? "codex_chatgpt_image" : "codex_chatgpt",
       authType: "codex_chatgpt",
       endpoint: "codex-app-server://local",
-      model: MODEL,
-      reasoningEffort: REASONING_EFFORT || "default",
+      model: IMAGE_ONLY ? IMAGE_MODEL : MODEL,
+      controllerModel: MODEL,
+      imageOnly: IMAGE_ONLY,
+      imageGenerationAvailable: status.imageGenerationAvailable,
+      reasoningEffort: IMAGE_ONLY ? "default" : REASONING_EFFORT || "default",
       authenticated: status.authenticated,
       accountType: status.accountType,
       planType: status.planType,
@@ -628,8 +732,10 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Accio Codex bridge listening on http://${HOST}:${PORT}`);
-  console.log(`model=${MODEL}`);
-  console.log(`reasoningEffort=${REASONING_EFFORT || "default"}`);
+  console.log(`mode=${IMAGE_ONLY ? "image" : "text"}`);
+  console.log(`model=${IMAGE_ONLY ? IMAGE_MODEL : MODEL}`);
+  console.log(`controllerModel=${MODEL}`);
+  console.log(`reasoningEffort=${IMAGE_ONLY ? "default" : REASONING_EFFORT || "default"}`);
 });
 
 codex.start().catch((error) => {

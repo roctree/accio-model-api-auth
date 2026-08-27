@@ -45,9 +45,13 @@ function Get-CurrentModeSummary {
     if ([string]$config.authType -eq "accio_native") {
         return "Accio 官方原生认证 / 思考由 Accio 控制"
     }
+    $imageSummary = ""
+    if ($null -ne $config.PSObject.Properties["codexImageEnabled"] -and [bool]$config.codexImageEnabled) {
+        $imageSummary = " / 生图 Codex gpt-image-2"
+    }
     if ([string]$config.authType -eq "codex_chatgpt") {
         $reasoning = Get-ReasoningSummary ([string]$config.reasoningEffort)
-        return "Codex / $([string]$config.model) / 思考$reasoning"
+        return "Codex / $([string]$config.model) / 思考$reasoning$imageSummary"
     }
     $reasoningEffort = [string]$config.reasoningEffort
     if ([string]::IsNullOrWhiteSpace($reasoningEffort) -and $null -ne $config.PSObject.Properties["openAiReasoningEffort"]) {
@@ -72,7 +76,7 @@ function Get-CurrentModeSummary {
         "custom_openai" { "自定义 API" }
         default { "OpenCode Go" }
     }
-    return "$providerName / $([string]$config.model) / 思考$reasoning / $apiAuthentication"
+    return "$providerName / $([string]$config.model) / 思考$reasoning / $apiAuthentication$imageSummary"
 }
 
 function Update-TrayStatus {

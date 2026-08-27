@@ -15,6 +15,7 @@
 - Accio 浏览器工具调用可完成完整的调用与结果回传。
 - 可通过 Codex App Server 使用本机 ChatGPT 托管登录，不需要复制 OAuth Token。
 - Codex 模型列表和每个模型支持的思考强度从本机 App Server 动态读取，已验证文本、多轮对话和动态工具结果回传。
+- 可单独开启 Codex 图片通道：Accio 的图片生成与编辑请求走 ChatGPT 订阅内的 `gpt-image-2`，文字请求仍走当前选择的 OpenCode、火山 Coding Plan、自定义 API 或 Codex 模型。
 - Accio 的模型选择位置会显示实际 API 服务商、上游返回的模型（若接口提供）与思考模式，切换配置后自动刷新。
 - 可切换回 Accio 官方原生认证，使用 Accio 自己的登录、官方模型和积分；已有 OpenCode 与 Codex 配置不会被删除。
 - OpenCode、火山 Coding Plan 和自定义 API 的 Key 分别保存在 Windows 凭据管理器中，互不覆盖，也不写入源码或配置文件。
@@ -25,9 +26,11 @@
 ```text
 Accio Desktop
   -> 本地路由网关（127.0.0.1:18767）
-     -> 模型请求：本地模型桥（127.0.0.1:18765）
+     -> 文字请求：本地模型桥（127.0.0.1:18765）
         -> OpenAI-compatible API（OpenCode Go、火山 Coding Plan 或自定义服务）
         -> 或本机 Codex App Server（ChatGPT 托管登录）
+     -> 图片请求：Codex 图片桥（127.0.0.1:18768）
+        -> ChatGPT 订阅中的 gpt-image-2
      -> 模型显示目录：读取本地模型桥当前状态，只改 Accio 显示名称
      -> Accio 功能请求：phoenix-gw.alibaba.com
 ```
@@ -56,9 +59,11 @@ OpenCode Go 与自定义 API 保留 DeepSeek 格式的“关闭、低、高、�
 
 Codex 模式下可在界面中点击“登录 Codex”，登录完成后点击“刷新 Codex 登录和模型”。选择模型后，“思考模式”只显示该模型实际支持的 `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`；切换到不支持当前强度的模型时自动使用该模型的默认值。OpenCode、火山、自定义 API 和 Codex 分别记住自己的地址、模型与思考模式，来回切换不会覆盖其他服务商的配置或 Key。
 
+需要图片能力时，勾选“图片生成使用 Codex 订阅（gpt-image-2，文字模型保持当前选择）”。本地路由按 Accio 请求中的 `responseModalities: ["IMAGE"]` 精确分流，图片生成和带参考图的编辑走 Codex 图片桥，其余模型请求不变。该功能不需要 OpenAI API Key，但必须已在本机 Codex 登录具有图片生成权限的 ChatGPT 账号；图片用量计入该账号的 Codex 使用额度。火山 Coding Plan 本身不含图片模型，因此没有 Agent Plan 时无需配置火山图片通道。Codex 图片能力依据：[Image generation](https://learn.chatgpt.com/docs/image-generation)。
+
 非敏感配置保存在 `%LOCALAPPDATA%\AccioModelApiAuth\config.json`。点击“保存并重启 Accio”后会先提示重启风险，再应用所选认证方式。切换到官方原生认证时，Accio 不再注入 `GATEWAY_BASE_URL`，模型、认证和积分全部恢复为 Accio 官方逻辑；切回 API 或 Codex 模式时继续使用之前保存的地址、模型和凭据，无需重新填写。
 
-首次启用真实模型显示后需要重启一次 Accio。此后 Accio 模型选择位置会以“`实际模型 · 思考模式 | Accio: 原名称`”显示，并每 5 秒从本地模型桥刷新。
+首次启用真实模型显示后需要重启一次 Accio。此后 Accio 模型选择位置会以“`实际模型 · 思考模式 | Accio: 原名称`”显示，并每 5 秒从本地模型桥刷新。图片模型固定为 `gpt-image-2`，可在配置界面的 Codex 状态和托盘当前模式中查看。
 
 ### 托盘与快捷方式
 

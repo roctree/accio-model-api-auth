@@ -48,6 +48,7 @@ $lastCustomReasoningEffort = "disabled"
 $lastCustomUseApiKey = $true
 $lastCodexModel = $defaultCodexModel
 $lastCodexReasoningEffort = ""
+$codexImageEnabled = $false
 $codexModelsById = @{}
 $previousAuthIndex = -1
 $previousApiProviderIndex = -1
@@ -165,7 +166,7 @@ function Get-CodexStatus {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Accio 模型接入配置"
-$form.ClientSize = New-Object System.Drawing.Size(660, 620)
+$form.ClientSize = New-Object System.Drawing.Size(660, 655)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -305,22 +306,29 @@ $codexStatusLabel.Size = New-Object System.Drawing.Size(460, 22)
 $codexStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(75, 85, 99)
 $form.Controls.Add($codexStatusLabel)
 
+$codexImageCheckBox = New-Object System.Windows.Forms.CheckBox
+$codexImageCheckBox.Text = "图片生成使用 Codex 订阅（gpt-image-2，文字模型保持当前选择）"
+$codexImageCheckBox.Location = New-Object System.Drawing.Point(30, 510)
+$codexImageCheckBox.Size = New-Object System.Drawing.Size(600, 24)
+$codexImageCheckBox.Checked = $false
+$form.Controls.Add($codexImageCheckBox)
+
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = "就绪"
-$statusLabel.Location = New-Object System.Drawing.Point(30, 515)
+$statusLabel.Location = New-Object System.Drawing.Point(30, 545)
 $statusLabel.Size = New-Object System.Drawing.Size(600, 24)
 $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(55, 65, 81)
 $form.Controls.Add($statusLabel)
 
 $saveButton = New-Object System.Windows.Forms.Button
 $saveButton.Text = "保存配置"
-$saveButton.Location = New-Object System.Drawing.Point(330, 560)
+$saveButton.Location = New-Object System.Drawing.Point(330, 595)
 $saveButton.Size = New-Object System.Drawing.Size(140, 38)
 $form.Controls.Add($saveButton)
 
 $startButton = New-Object System.Windows.Forms.Button
 $startButton.Text = "保存并重启 Accio"
-$startButton.Location = New-Object System.Drawing.Point(484, 560)
+$startButton.Location = New-Object System.Drawing.Point(484, 595)
 $startButton.Size = New-Object System.Drawing.Size(146, 38)
 $startButton.BackColor = [System.Drawing.Color]::FromArgb(37, 99, 235)
 $startButton.ForeColor = [System.Drawing.Color]::White
@@ -631,8 +639,9 @@ function Update-ModeControls {
     $apiKeyHintLabel.Enabled = $usesApi
     $reasoningEffortLabel.Enabled = -not $usesNative
     $reasoningEffortComboBox.Enabled = -not $usesNative
-    $codexRefreshButton.Enabled = $usesCodex
-    $codexLoginButton.Enabled = $usesCodex
+    $codexImageCheckBox.Enabled = -not $usesNative
+    $codexRefreshButton.Enabled = $usesCodex -or $codexImageCheckBox.Checked
+    $codexLoginButton.Enabled = $usesCodex -or $codexImageCheckBox.Checked
     $script:previousAuthIndex = $authComboBox.SelectedIndex
 }
 
@@ -643,29 +652,32 @@ function Refresh-CodexStatus {
     $form.Refresh()
     try {
         $status = Get-CodexStatus
-        $selectedModel = $modelComboBox.Text
-        $selectedReasoningEffort = $reasoningEffortComboBox.Text
-        $script:codexModelsById.Clear()
-        $modelComboBox.BeginUpdate()
-        $modelComboBox.Items.Clear()
-        foreach ($item in $status.models) {
-            [void]$modelComboBox.Items.Add([string]$item.id)
-            $script:codexModelsById[[string]$item.id] = $item
-        }
-        $modelComboBox.EndUpdate()
-        if (-not [string]::IsNullOrWhiteSpace($selectedModel) -and $modelComboBox.Items.Contains($selectedModel)) {
-            $modelComboBox.SelectedItem = $selectedModel
-        } else {
-            $default = $status.models | Where-Object { $_.isDefault } | Select-Object -First 1
-            if ($default) {
-                $modelComboBox.SelectedItem = [string]$default.id
-            } elseif ($modelComboBox.Items.Count -gt 0) {
-                $modelComboBox.SelectedIndex = 0
+        if ($authComboBox.SelectedIndex -eq 1) {
+            $selectedModel = $modelComboBox.Text
+            $selectedReasoningEffort = $reasoningEffortComboBox.Text
+            $script:codexModelsById.Clear()
+            $modelComboBox.BeginUpdate()
+            $modelComboBox.Items.Clear()
+            foreach ($item in $status.models) {
+                [void]$modelComboBox.Items.Add([string]$item.id)
+                $script:codexModelsById[[string]$item.id] = $item
             }
+            $modelComboBox.EndUpdate()
+            if (-not [string]::IsNullOrWhiteSpace($selectedModel) -and $modelComboBox.Items.Contains($selectedModel)) {
+                $modelComboBox.SelectedItem = $selectedModel
+            } else {
+                $default = $status.models | Where-Object { $_.isDefault } | Select-Object -First 1
+                if ($default) {
+                    $modelComboBox.SelectedItem = [string]$default.id
+                } elseif ($modelComboBox.Items.Count -gt 0) {
+                    $modelComboBox.SelectedIndex = 0
+                }
+            }
+            Update-ReasoningEfforts $selectedReasoningEffort
         }
-        Update-ReasoningEfforts $selectedReasoningEffort
         if ($status.authenticated) {
-            $codexStatusLabel.Text = "已登录 ChatGPT（$($status.planType)），可用模型 $($status.models.Count) 个"
+            $imageStatus = if ($status.imageGenerationAvailable) { "，gpt-image-2 可用" } else { "，图片生成不可用" }
+            $codexStatusLabel.Text = "已登录 ChatGPT（$($status.planType)），可用模型 $($status.models.Count) 个$imageStatus"
             $codexStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(21, 128, 61)
         } else {
             $codexStatusLabel.Text = "尚未登录 ChatGPT，请点击登录 Codex"
@@ -673,7 +685,7 @@ function Refresh-CodexStatus {
         }
     } finally {
         $form.UseWaitCursor = $false
-        $codexRefreshButton.Enabled = $authComboBox.SelectedIndex -eq 1
+        $codexRefreshButton.Enabled = $authComboBox.SelectedIndex -eq 1 -or $codexImageCheckBox.Checked
     }
 }
 
@@ -747,6 +759,7 @@ function Save-Configuration {
         customUseApiKey = $script:lastCustomUseApiKey
         codexModel = $script:lastCodexModel
         codexReasoningEffort = $script:lastCodexReasoningEffort
+        codexImageEnabled = [bool]$codexImageCheckBox.Checked
     } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
     if ($authType -eq "api_key" -and -not [string]::IsNullOrWhiteSpace($apiKeyTextBox.Text)) {
         [AccioModelApiAuth.NativeCredential]::Write((Get-ApiCredentialTarget $apiProvider), $apiKeyTextBox.Text)
@@ -766,6 +779,10 @@ function Show-ConfigurationError([string]$message) {
 }
 
 $authComboBox.Add_SelectedIndexChanged({
+    Update-ModeControls
+})
+
+$codexImageCheckBox.Add_CheckedChanged({
     Update-ModeControls
 })
 
@@ -959,6 +976,9 @@ if (Test-Path -LiteralPath $configPath) {
     } elseif ([string]$config.authType -eq "codex_chatgpt" -and $null -ne $config.PSObject.Properties["reasoningEffort"]) {
         $lastCodexReasoningEffort = [string]$config.reasoningEffort
     }
+    if ($null -ne $config.PSObject.Properties["codexImageEnabled"]) {
+        $codexImageEnabled = [bool]$config.codexImageEnabled
+    }
 
     $apiProviderComboBox.SelectedIndex = switch ($lastApiProvider) {
         $volcengineProvider { 1 }
@@ -974,6 +994,7 @@ if (Test-Path -LiteralPath $configPath) {
     } else {
         $authComboBox.SelectedIndex = 0
     }
+    $codexImageCheckBox.Checked = $codexImageEnabled
 } else {
     $apiProviderComboBox.SelectedIndex = 0
     $authComboBox.SelectedIndex = 0
@@ -981,7 +1002,7 @@ if (Test-Path -LiteralPath $configPath) {
 Update-ModeControls
 
 $form.Add_Shown({
-    if ($authComboBox.SelectedIndex -eq 1) {
+    if ($authComboBox.SelectedIndex -eq 1 -or $codexImageCheckBox.Checked) {
         try {
             Refresh-CodexStatus
         } catch {

@@ -14,6 +14,10 @@ $customApiCredentialTarget = "AccioCustomOpenAiApiKey"
 $localGatewayCredentialTarget = "AccioLocalGatewayPassword"
 $relayUrl = "http://127.0.0.1:18767"
 $bridgeUrl = "http://127.0.0.1:18765"
+$imageBridgeUrl = "http://127.0.0.1:18768"
+$imageModel = "gpt-image-2"
+$imageControllerModel = "gpt-5.6-sol"
+$codexImageEnabled = $false
 $openCodeProvider = "opencode_go"
 $volcengineProvider = "volcengine_coding_plan"
 $customApiProvider = "custom_openai"
@@ -61,6 +65,15 @@ if (Test-Path -LiteralPath $configPath) {
         } else {
             $reasoningEffort = "high"
         }
+    }
+    if ($null -ne $config.PSObject.Properties["codexImageEnabled"]) {
+        $codexImageEnabled = [bool]$config.codexImageEnabled
+    }
+    if ($null -ne $config.PSObject.Properties["codexModel"] -and
+        -not [string]::IsNullOrWhiteSpace([string]$config.codexModel)) {
+        $imageControllerModel = [string]$config.codexModel
+    } elseif ($authType -eq "codex_chatgpt") {
+        $imageControllerModel = $model
     }
 }
 $credentialTarget = switch ($apiProvider) {
@@ -380,6 +393,48 @@ $bridgeApiProvider = ""
 if ($null -ne $bridgeHealth -and $null -ne $bridgeHealth.PSObject.Properties["authType"]) {
     $bridgeAuthType = [string]$bridgeHealth.authType
 }
+
+function Stop-ImageBridgeProcess {
+    $connection = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 18768 -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $connection) {
+        return
+    }
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($connection.OwningProcess)"
+    if ($null -eq $process -or [string]::IsNullOrWhiteSpace($process.CommandLine) -or
+        $process.CommandLine.IndexOf($codexBridgeScript, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "Port 18768 is owned by an unexpected process"
+    }
+    Stop-Process -Id $connection.OwningProcess -Force
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        Start-Sleep -Milliseconds 100
+        if ($null -eq (Get-Health "$imageBridgeUrl/healthz")) {
+            return
+        }
+    }
+    throw "Accio Codex image bridge did not stop"
+}
+
+function Stop-RelayProcess {
+    $connection = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 18767 -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $connection) {
+        return
+    }
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($connection.OwningProcess)"
+    if ($null -eq $process -or [string]::IsNullOrWhiteSpace($process.CommandLine) -or
+        $process.CommandLine.IndexOf($relayScript, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "Port 18767 is owned by an unexpected process"
+    }
+    Stop-Process -Id $connection.OwningProcess -Force
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        Start-Sleep -Milliseconds 100
+        if ($null -eq (Get-Health "$relayUrl/healthz")) {
+            return
+        }
+    }
+    throw "Accio relay did not stop"
+}
 $expectedReasoningEffort = if (-not [string]::IsNullOrWhiteSpace($reasoningEffort)) { $reasoningEffort } else { "default" }
 if ($null -ne $bridgeHealth -and $null -ne $bridgeHealth.PSObject.Properties["reasoningEffort"]) {
     $bridgeReasoningEffort = [string]$bridgeHealth.reasoningEffort
@@ -470,11 +525,75 @@ if ($null -eq $bridgeHealth -or $bridgeHealth.model -ne $model -or $bridgeHealth
     throw "Accio model bridge health check failed"
 }
 
+$imageBridgeHealth = Get-Health "$imageBridgeUrl/healthz"
+if ($codexImageEnabled) {
+    $imageBridgeConfigurationChanged = $null -ne $imageBridgeHealth -and (
+        [string]$imageBridgeHealth.provider -ne "codex_chatgpt_image" -or
+        [string]$imageBridgeHealth.model -ne $imageModel -or
+        [string]$imageBridgeHealth.controllerModel -ne $imageControllerModel -or
+        -not [bool]$imageBridgeHealth.imageOnly
+    )
+    if ($null -ne $imageBridgeHealth -and ($RestartBridge -or $imageBridgeConfigurationChanged)) {
+        Stop-ImageBridgeProcess
+        $imageBridgeHealth = $null
+    }
+    if ($null -eq $imageBridgeHealth) {
+        $env:ACCIO_CODEX_PORT = "18768"
+        $env:ACCIO_CODEX_IMAGE_ONLY = "true"
+        $env:ACCIO_CODEX_IMAGE_MODEL = $imageModel
+        $env:ACCIO_CODEX_EXE = Get-CodexExecutable
+        $env:ACCIO_CODEX_MODEL = $imageControllerModel
+        Remove-Item Env:ACCIO_CODEX_REASONING_EFFORT -ErrorAction SilentlyContinue
+        $env:ACCIO_CODEX_CWD = $PSScriptRoot
+        try {
+            Start-Process -FilePath $nodeExe -ArgumentList "`"$codexBridgeScript`"" -WindowStyle Hidden
+        } finally {
+            Remove-Item Env:ACCIO_CODEX_PORT -ErrorAction SilentlyContinue
+            Remove-Item Env:ACCIO_CODEX_IMAGE_ONLY -ErrorAction SilentlyContinue
+            Remove-Item Env:ACCIO_CODEX_IMAGE_MODEL -ErrorAction SilentlyContinue
+            Remove-Item Env:ACCIO_CODEX_EXE -ErrorAction SilentlyContinue
+            Remove-Item Env:ACCIO_CODEX_MODEL -ErrorAction SilentlyContinue
+            Remove-Item Env:ACCIO_CODEX_CWD -ErrorAction SilentlyContinue
+        }
+        for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            $imageBridgeHealth = Get-Health "$imageBridgeUrl/healthz"
+            if ($null -ne $imageBridgeHealth) { break }
+        }
+    }
+    if ($null -eq $imageBridgeHealth -or
+        [string]$imageBridgeHealth.provider -ne "codex_chatgpt_image" -or
+        [string]$imageBridgeHealth.model -ne $imageModel -or
+        [string]$imageBridgeHealth.controllerModel -ne $imageControllerModel -or
+        -not [bool]$imageBridgeHealth.imageOnly -or
+        -not [bool]$imageBridgeHealth.authenticated -or
+        -not [bool]$imageBridgeHealth.imageGenerationAvailable) {
+        throw "Codex subscription image bridge health check failed"
+    }
+} elseif ($null -ne $imageBridgeHealth -and $RestartBridge) {
+    Stop-ImageBridgeProcess
+    $imageBridgeHealth = $null
+}
+
 $relayHealth = Get-Health "$relayUrl/healthz"
+$expectedImageBridge = if ($codexImageEnabled) { $imageBridgeUrl } else { "" }
+$reportedImageBridge = ""
+if ($null -ne $relayHealth -and $null -ne $relayHealth.PSObject.Properties["imageBridge"] -and $null -ne $relayHealth.imageBridge) {
+    $reportedImageBridge = [string]$relayHealth.imageBridge
+}
+if ($null -ne $relayHealth -and ($RestartBridge -or $reportedImageBridge -ne $expectedImageBridge)) {
+    Stop-RelayProcess
+    $relayHealth = $null
+}
 if ($null -eq $relayHealth) {
     $env:ACCIO_RELAY_PORT = "18767"
     $env:ACCIO_RELAY_LOG = $relayLog
     $env:ACCIO_LOCAL_GATEWAY_PASSWORD = $localGatewayPassword
+    if ($codexImageEnabled) {
+        $env:ACCIO_IMAGE_BRIDGE_URL = $imageBridgeUrl
+    } else {
+        Remove-Item Env:ACCIO_IMAGE_BRIDGE_URL -ErrorAction SilentlyContinue
+    }
     Start-Process -FilePath $nodeExe -ArgumentList "`"$relayScript`"" -WindowStyle Hidden
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
@@ -482,7 +601,13 @@ if ($null -eq $relayHealth) {
         if ($null -ne $relayHealth) { break }
     }
 }
-if ($null -eq $relayHealth -or $relayHealth.modelBridge -ne $bridgeUrl -or $relayHealth.originalGateway -ne "https://phoenix-gw.alibaba.com") {
+$reportedImageBridge = ""
+if ($null -ne $relayHealth -and $null -ne $relayHealth.PSObject.Properties["imageBridge"] -and $null -ne $relayHealth.imageBridge) {
+    $reportedImageBridge = [string]$relayHealth.imageBridge
+}
+if ($null -eq $relayHealth -or $relayHealth.modelBridge -ne $bridgeUrl -or
+    $reportedImageBridge -ne $expectedImageBridge -or
+    $relayHealth.originalGateway -ne "https://phoenix-gw.alibaba.com") {
     throw "Accio relay health check failed"
 }
 
@@ -498,4 +623,5 @@ if (-not $BackendOnly) {
     }
 }
 
-Write-Output "Accio model API backend is ready: $authType / $apiProvider / $model / $expectedReasoningEffort"
+$imageStatus = if ($codexImageEnabled) { "Codex/$imageModel" } else { "disabled" }
+Write-Output "Accio model API backend is ready: $authType / $apiProvider / $model / $expectedReasoningEffort / image=$imageStatus"
