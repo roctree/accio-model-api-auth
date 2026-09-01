@@ -309,28 +309,38 @@ function Get-VolcengineDashboardData {
         $planKey = [string](Get-JsonPropertyValue $plan "key" "")
         try {
             $modelResponse = Invoke-ArkCliJson "arkcli-plans" @("plans", "model-list", "--plan", $planKey, "--format", "json")
-            $latestModelId = [string](Get-JsonPropertyValue $modelResponse "ark_latest_model_id" "")
+            $selectedModelId = [string](Get-JsonPropertyValue $modelResponse "selected_model_id" "")
+            $legacyLatestModelId = [string](Get-JsonPropertyValue $modelResponse "ark_latest_model_id" "")
+            if ([string]::IsNullOrWhiteSpace($selectedModelId)) {
+                $selectedModelId = $legacyLatestModelId
+            }
             foreach ($model in @(Get-JsonPropertyValue $modelResponse "models" @())) {
                 $modelId = [string](Get-JsonPropertyValue $model "model_id" "")
-                if ([string]::IsNullOrWhiteSpace($modelId)) {
+                $outputName = [string](Get-JsonPropertyValue $model "output_name" "")
+                $configuredModelName = if (-not [string]::IsNullOrWhiteSpace($outputName)) { $outputName } else { $modelId }
+                if ([string]::IsNullOrWhiteSpace($configuredModelName)) {
                     continue
                 }
-                $isLatest = [bool](Get-JsonPropertyValue $model "is_ark_latest" $false)
-                $note = if ($isLatest) { "ark-code-latest 当前指向" } else { "" }
+                $legacyIsLatest = [bool](Get-JsonPropertyValue $model "is_ark_latest" $false)
+                $isSelected = [bool](Get-JsonPropertyValue $model "selected" $legacyIsLatest)
+                if (-not $isSelected -and -not [string]::IsNullOrWhiteSpace($selectedModelId)) {
+                    $isSelected = $modelId -eq $selectedModelId
+                }
+                $note = if ($isSelected) { "当前套餐选中模型" } else { "" }
                 $modelRows += [pscustomobject]@{
                     Plan = $planKey
-                    ModelId = $modelId
+                    ModelId = $configuredModelName
                     Note = $note
                 }
-                if (-not $modelIds.Contains($modelId)) {
-                    [void]$modelIds.Add($modelId)
+                if (-not $modelIds.Contains($configuredModelName)) {
+                    [void]$modelIds.Add($configuredModelName)
                 }
             }
-            if (-not [string]::IsNullOrWhiteSpace($latestModelId)) {
+            if (-not [string]::IsNullOrWhiteSpace($legacyLatestModelId)) {
                 $modelRows += [pscustomobject]@{
                     Plan = $planKey
                     ModelId = "ark-code-latest"
-                    Note = "别名 -> $latestModelId"
+                    Note = "别名 -> $legacyLatestModelId"
                 }
                 if (-not $modelIds.Contains("ark-code-latest")) {
                     [void]$modelIds.Add("ark-code-latest")
