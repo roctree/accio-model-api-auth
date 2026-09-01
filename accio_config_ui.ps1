@@ -1585,7 +1585,7 @@ $startButton.Add_Click({
         $statusLabel.Text = "正在应用配置并启动 Accio..."
         $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(37, 99, 235)
         $form.Refresh()
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launcherPath -RestartBridge -RestartAccio 2>&1
+        $output = & powershell.exe -NoProfile -File $launcherPath -RestartBridge -RestartAccio 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw ($output | Out-String)
         }

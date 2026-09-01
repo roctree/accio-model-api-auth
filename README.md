@@ -61,7 +61,7 @@
 双击 [`open_config_ui.cmd`](./open_config_ui.cmd)，也可以在 PowerShell 中运行下面的命令。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_config_ui.ps1
+powershell -NoProfile -File .\accio_config_ui.ps1
 ```
 
 ### 第二步选择认证方式
@@ -223,25 +223,25 @@ Codex 内置 shell、文件、Web、MCP 和子智能体工具不会桥接给 Acc
 保存当前 API 服务商的 Key。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -StoreCredential
+powershell -NoProfile -File .\accio_opencode_launcher.ps1 -StoreCredential
 ```
 
 启动本地服务与 Accio。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1
+powershell -NoProfile -File .\accio_opencode_launcher.ps1
 ```
 
 只启动本地文字桥、图片桥和路由网关。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -BackendOnly
+powershell -NoProfile -File .\accio_opencode_launcher.ps1 -BackendOnly
 ```
 
 强制重启本地桥接服务。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -BackendOnly -RestartBridge
+powershell -NoProfile -File .\accio_opencode_launcher.ps1 -BackendOnly -RestartBridge
 ```
 
 ## 配置与凭据

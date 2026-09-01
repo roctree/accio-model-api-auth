@@ -21,7 +21,7 @@ function New-AccioShortcut(
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath = $powershellExe
-    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+    $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -File `"$scriptPath`""
     $shortcut.WorkingDirectory = $PSScriptRoot
     $shortcut.IconLocation = "$accioExe,0"
     $shortcut.Description = $description
@@ -34,7 +34,7 @@ New-AccioShortcut $startupPath $trayPath "登录 Windows 后启动 Accio 模型�
 
 if (-not $NoStart) {
     Start-Process -FilePath $powershellExe `
-        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$trayPath`"" `
+        -ArgumentList "-NoProfile -WindowStyle Hidden -File `"$trayPath`"" `
         -WindowStyle Hidden
 }
 

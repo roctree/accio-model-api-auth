@@ -113,7 +113,7 @@ function Show-TrayError([string]$message) {
 
 function Open-Configuration {
     Start-Process -FilePath $powershellExe `
-        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$configUiPath`"" `
+        -ArgumentList "-NoProfile -WindowStyle Hidden -File `"$configUiPath`"" `
         -WindowStyle Hidden
 }
 
@@ -130,7 +130,7 @@ function Get-AccioProcesses {
 }
 
 function Invoke-Launcher([string[]]$launcherArguments) {
-    $output = & $powershellExe -NoProfile -ExecutionPolicy Bypass -File $launcherPath @launcherArguments 2>&1
+    $output = & $powershellExe -NoProfile -File $launcherPath @launcherArguments 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw ($output | Out-String)
     }
