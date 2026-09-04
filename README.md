@@ -8,6 +8,7 @@
 [![Accio](https://img.shields.io/badge/Accio-0.30.2%20verified-6C5CE7)](#验证记录)
 [![Node.js](https://img.shields.io/badge/Runtime-Node.js-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![Local](https://img.shields.io/badge/Network-127.0.0.1-2D3436)](#安全说明)
+[![Checks](https://github.com/roctree/accio-model-api-auth/actions/workflows/checks.yml/badge.svg)](https://github.com/roctree/accio-model-api-auth/actions/workflows/checks.yml)
 
 在 Accio 里使用 OpenCode Go、火山引擎 Coding Plan、自定义 OpenAI-compatible API 或本机 Codex ChatGPT 登录。图片请求还能独立走 ChatGPT 订阅中的 `gpt-image-2`。
 
@@ -63,6 +64,9 @@
 ```powershell
 powershell -NoProfile -File .\accio_config_ui.ps1
 ```
+
+> [!NOTE]
+> 启动脚本尊重当前 Windows PowerShell 执行策略，不再使用 `ExecutionPolicy Bypass`，也不会自动修改系统策略。若提示“禁止运行脚本”或“未进行数字签名”，先在 Windows PowerShell 中运行 `Get-ExecutionPolicy -List` 查看原因。`Restricted` 会阻止脚本，`AllSigned` 要求签名；`RemoteSigned` 下的网络下载文件也可能被阻止。只在核实来源并审阅代码后，按 [Microsoft 执行策略说明](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1) 处理对应文件；受单位策略管理的电脑请联系管理员，不要关闭杀毒软件或添加全盘排除。
 
 ### 第二步选择认证方式
 
@@ -264,6 +268,29 @@ powershell -NoProfile -File .\accio_opencode_launcher.ps1 -BackendOnly -RestartB
 
 ## 验证记录
 
+### 自动化检查
+
+每次 PR 更新，以及 `main`、`feat/**`、`feature/**` 分支推送，都会触发 [Windows checks](https://github.com/roctree/accio-model-api-auth/actions/workflows/checks.yml)。测试不启动 Accio，不读取真实登录凭据，也不调用收费模型。
+
+| 检查 | 覆盖内容 |
+| --- | --- |
+| PowerShell 语法 | 仓库内所有 `.ps1` 文件的 AST 解析 |
+| JavaScript 语法 | 已跟踪 `.js` / `.cjs` 文件的 `node --check` |
+| 配置回归测试 | 火山新旧模型字段、个人与团队套餐、空数据、失败隔离、零额度、模型与思考档位保留 |
+| Codex 状态回归测试 | 模拟 JSON-RPC、多组与旧版额度、空值、用量服务失败、未登录、进程清理 |
+| 差异检查 | 提交中的空白字符错误 |
+
+本地复现（Windows PowerShell 5.1 与 Node.js 24）：
+
+```powershell
+powershell -NoProfile -File .\tests\config-ui.tests.ps1
+node --test .\tests\codex-status.test.cjs
+```
+
+测试数据是人工构造的离线样例。CI 通过不等于真实套餐、所有 Accio 版本或杀毒软件均验证通过。工作流只使用仓库读取权限，不传入业务密钥，依赖的官方 Actions 固定到提交 SHA。
+
+### 历史本机验证
+
 | 项目 | 验证结果 |
 | --- | --- |
 | Accio Desktop `0.30.2` | Windows 本机通过 |
@@ -289,6 +316,7 @@ powershell -NoProfile -File .\accio_opencode_launcher.ps1 -BackendOnly -RestartB
 
 ## 安全说明
 
+- 清理高风险启动参数只能减少可疑特征，不能保证不被任何杀毒软件误报；当前脚本没有商业代码签名
 - 不要把 API Key、Cookie、登录令牌或运行日志提交到仓库
 - 项目不会读取或导出 Codex、ChatGPT 或 Accio 的登录令牌
 - 本地服务只监听 `127.0.0.1`

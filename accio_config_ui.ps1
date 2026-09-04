@@ -1095,7 +1095,6 @@ function Start-CurrentServiceLogin {
             Start-Process -FilePath $powershellExe -ArgumentList @(
                 "-NoExit",
                 "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
                 "-File", "`"$arkCliScript`"",
                 "auth", "login", "volc-sso"
             )
