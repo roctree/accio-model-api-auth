@@ -5,12 +5,23 @@ $uiPath = Join-Path $repoRoot 'accio_config_ui.ps1'
 
 # Parse every PowerShell file, but never dot-source the UI or the launcher.
 foreach ($file in Get-ChildItem -LiteralPath $repoRoot -Filter '*.ps1' -Recurse) {
+    # Windows PowerShell 5.1 otherwise decodes non-ASCII scripts using the system ANSI code page.
+    $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+    $sourceText = [System.IO.File]::ReadAllText($file.FullName)
+    if ($sourceText -match '[^\x00-\x7F]' -and
+        ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF)) {
+        throw "Non-ASCII PowerShell file requires UTF-8 BOM: $($file.Name)"
+    }
     $tokens = $null
     $parseErrors = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors)
-    if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+    if ($parseErrors.Count -gt 0) {
+        throw (($parseErrors | ForEach-Object {
+            "$($file.Name):$($_.Extent.StartLineNumber): $($_.Message)"
+        }) -join [Environment]::NewLine)
+    }
 }
-Write-Output 'PASS: PowerShell syntax'
+Write-Output 'PASS: PowerShell syntax and UTF-8 BOM'
 
 $uiAst = [System.Management.Automation.Language.Parser]::ParseFile($uiPath, [ref]$null, [ref]$null)
 $functionNames = @(

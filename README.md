@@ -274,7 +274,7 @@ powershell -NoProfile -File .\accio_opencode_launcher.ps1 -BackendOnly -RestartB
 
 | 检查 | 覆盖内容 |
 | --- | --- |
-| PowerShell 语法 | 仓库内所有 `.ps1` 文件的 AST 解析 |
+| PowerShell 语法与编码 | 所有 `.ps1` 文件的 AST 解析；含中文等非 ASCII 字符的脚本必须带 UTF-8 BOM，兼容英文 Windows PowerShell 5.1 |
 | JavaScript 语法 | 已跟踪 `.js` / `.cjs` 文件的 `node --check` |
 | 配置回归测试 | 火山新旧模型字段、个人与团队套餐、空数据、失败隔离、零额度、模型与思考档位保留 |
 | Codex 状态回归测试 | 模拟 JSON-RPC、多组与旧版额度、空值、用量服务失败、未登录、进程清理 |
