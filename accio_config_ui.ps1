@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName System.Drawing
@@ -24,7 +24,7 @@ $defaultModel = "deepseek-v4-flash"
 $defaultVolcengineModel = "deepseek-v4-flash"
 $defaultCodexModel = "gpt-5.6-sol"
 $openCodeModels = @("deepseek-v4-flash")
-$volcengineModels = @(
+$volcenginePresetModels = @(
     "deepseek-v4-flash",
     "deepseek-v4-pro",
     "doubao-seed-evolving",
@@ -36,6 +36,10 @@ $volcengineModels = @(
     "minimax-m3",
     "ark-code-latest"
 )
+$volcengineModels = @($volcenginePresetModels)
+$volcengineLiveModels = @()
+$volcengineLiveModelsUpdatedAt = ""
+$arkCliRefreshIntervalMs = 300000
 $lastApiProvider = $openCodeProvider
 $lastOpenCodeModel = $defaultModel
 $lastOpenCodeReasoningEffort = "high"
@@ -53,6 +57,19 @@ $codexModelsById = @{}
 $previousAuthIndex = -1
 $previousApiProviderIndex = -1
 $updatingApiProvider = $false
+$formShown = $false
+$volcengineRefreshing = $false
+$codexRefreshing = $false
+$volcengineRefreshPowerShell = $null
+$volcengineRefreshAsyncResult = $null
+$codexRefreshPowerShell = $null
+$codexRefreshAsyncResult = $null
+$volcengineStatusText = "等待读取火山 Coding Plan 状态..."
+$volcengineStatusLevel = "idle"
+$volcengineStatusToolTip = ""
+$codexStatusText = "等待读取 Codex 登录、额度和模型..."
+$codexStatusLevel = "idle"
+$codexStatusToolTip = ""
 
 if (-not ("AccioModelApiAuth.NativeCredential" -as [type])) {
     Add-Type -TypeDefinition @'
@@ -162,11 +179,197 @@ function Get-CodexStatus {
     }
 }
 
+function Get-JsonPropertyValue($object, [string]$name, $defaultValue = $null) {
+    if ($null -eq $object) {
+        return $defaultValue
+    }
+    $property = $object.PSObject.Properties[$name]
+    if ($null -eq $property) {
+        return $defaultValue
+    }
+    return $property.Value
+}
+
+function Get-ArkCliScript {
+    $command = Get-Command arkcli.ps1 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $command) {
+        $command = Get-Command arkcli -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    if ($null -eq $command -or [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+        throw "未安装火山官方 Ark CLI。请先执行：npm install -g @volcengine/ark-cli@latest"
+    }
+    return [string]$command.Source
+}
+
+function Invoke-ArkCliJson([string]$skillName, [string[]]$arguments) {
+    $arkCliScript = Get-ArkCliScript
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $environmentNames = @(
+        "ARKCLI_NO_UPDATE_NOTIFIER",
+        "ARKCLI_CALLER_TYPE",
+        "ARKCLI_CALLER_NAME",
+        "ARKCLI_SKILL_NAME"
+    )
+    $previousEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    }
+    try {
+        $env:ARKCLI_NO_UPDATE_NOTIFIER = "1"
+        $env:ARKCLI_CALLER_TYPE = "ai_agent"
+        $env:ARKCLI_CALLER_NAME = "accio-model-api-auth"
+        $env:ARKCLI_SKILL_NAME = $skillName
+        $output = & $arkCliScript @arguments 2> $stderrPath
+        $exitCode = $LASTEXITCODE
+        $stdout = (@($output) | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+        $stderr = ""
+        if (Test-Path -LiteralPath $stderrPath) {
+            $stderrContent = Get-Content -LiteralPath $stderrPath -Raw
+            if ($null -ne $stderrContent) {
+                $stderr = $stderrContent.Trim()
+            }
+        }
+        if ($exitCode -ne 0) {
+            $message = if (-not [string]::IsNullOrWhiteSpace($stderr)) { $stderr } else { $stdout.Trim() }
+            throw "Ark CLI 命令失败（退出码 $exitCode）：$message"
+        }
+        if ([string]::IsNullOrWhiteSpace($stdout)) {
+            throw "Ark CLI 没有返回 JSON 数据"
+        }
+        try {
+            return ($stdout | ConvertFrom-Json)
+        } catch {
+            throw "Ark CLI 返回的不是有效 JSON：$stdout"
+        }
+    } finally {
+        foreach ($name in $environmentNames) {
+            $previousValue = $previousEnvironment[$name]
+            if ($null -eq $previousValue) {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            } else {
+                Set-Item -LiteralPath "Env:$name" -Value $previousValue
+            }
+        }
+        Remove-Item -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-ArkCliVersion {
+    $arkCliScript = Get-ArkCliScript
+    $output = & $arkCliScript --version 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "无法读取 Ark CLI 版本"
+    }
+    return ((@($output) | ForEach-Object { [string]$_ }) -join " ").Trim()
+}
+
+function Get-VolcengineDashboardData {
+    $auth = Invoke-ArkCliJson "arkcli-auth" @("auth", "status", "--format", "json")
+    $loggedIn = [bool](Get-JsonPropertyValue $auth "logged_in" $false)
+    if (-not $loggedIn) {
+        return [pscustomobject]@{
+            CliVersion = Get-ArkCliVersion
+            LoggedIn = $false
+            Auth = $auth
+            Plans = @()
+            UsageItems = @()
+            Viewer = $null
+            Models = @()
+            LiveModelIds = @()
+            Errors = @()
+            RefreshedAt = Get-Date
+        }
+    }
+
+    $plansResponse = Invoke-ArkCliJson "arkcli-plans" @("plans", "get", "--format", "json")
+    $allPlans = @(Get-JsonPropertyValue $plansResponse "plans" @())
+    $codingPlans = @($allPlans | Where-Object {
+        $key = [string](Get-JsonPropertyValue $_ "key" "")
+        $key -eq "coding-plan" -or $key -eq "coding-plan-team"
+    })
+
+    $usageItems = @()
+    $viewer = $null
+    $queryErrors = @()
+    try {
+        $usageResponse = Invoke-ArkCliJson "arkcli-usage" @("usage", "plan", "--format", "json")
+        $usageItems = @(Get-JsonPropertyValue $usageResponse "items" @()) | Where-Object {
+            $product = [string](Get-JsonPropertyValue $_ "product" "")
+            $product -eq "coding-plan" -or $product -eq "coding-plan-team"
+        }
+        $viewer = Get-JsonPropertyValue $usageResponse "viewer" $null
+    } catch {
+        $queryErrors += "套餐用量：$($_.Exception.Message)"
+    }
+
+    $modelRows = @()
+    $modelIds = New-Object System.Collections.Generic.List[string]
+    $modelErrors = @()
+    foreach ($plan in $codingPlans) {
+        $planKey = [string](Get-JsonPropertyValue $plan "key" "")
+        try {
+            $modelResponse = Invoke-ArkCliJson "arkcli-plans" @("plans", "model-list", "--plan", $planKey, "--format", "json")
+            $selectedModelId = [string](Get-JsonPropertyValue $modelResponse "selected_model_id" "")
+            $legacyLatestModelId = [string](Get-JsonPropertyValue $modelResponse "ark_latest_model_id" "")
+            if ([string]::IsNullOrWhiteSpace($selectedModelId)) {
+                $selectedModelId = $legacyLatestModelId
+            }
+            foreach ($model in @(Get-JsonPropertyValue $modelResponse "models" @())) {
+                $modelId = [string](Get-JsonPropertyValue $model "model_id" "")
+                $outputName = [string](Get-JsonPropertyValue $model "output_name" "")
+                $configuredModelName = if (-not [string]::IsNullOrWhiteSpace($outputName)) { $outputName } else { $modelId }
+                if ([string]::IsNullOrWhiteSpace($configuredModelName)) {
+                    continue
+                }
+                $legacyIsLatest = [bool](Get-JsonPropertyValue $model "is_ark_latest" $false)
+                $isSelected = [bool](Get-JsonPropertyValue $model "selected" $legacyIsLatest)
+                if (-not $isSelected -and -not [string]::IsNullOrWhiteSpace($selectedModelId)) {
+                    $isSelected = $modelId -eq $selectedModelId
+                }
+                $note = if ($isSelected) { "当前套餐选中模型" } else { "" }
+                $modelRows += [pscustomobject]@{
+                    Plan = $planKey
+                    ModelId = $configuredModelName
+                    Note = $note
+                }
+                if (-not $modelIds.Contains($configuredModelName)) {
+                    [void]$modelIds.Add($configuredModelName)
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($legacyLatestModelId)) {
+                $modelRows += [pscustomobject]@{
+                    Plan = $planKey
+                    ModelId = "ark-code-latest"
+                    Note = "别名 -> $legacyLatestModelId"
+                }
+                if (-not $modelIds.Contains("ark-code-latest")) {
+                    [void]$modelIds.Add("ark-code-latest")
+                }
+            }
+        } catch {
+            $modelErrors += "${planKey}：$($_.Exception.Message)"
+        }
+    }
+
+    return [pscustomobject]@{
+        CliVersion = Get-ArkCliVersion
+        LoggedIn = $true
+        Auth = $auth
+        Plans = @($codingPlans)
+        UsageItems = @($usageItems)
+        Viewer = $viewer
+        Models = @($modelRows)
+        LiveModelIds = @($modelIds)
+        Errors = @($queryErrors + $modelErrors)
+        RefreshedAt = Get-Date
+    }
+}
+
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Accio 模型接入配置"
-$form.ClientSize = New-Object System.Drawing.Size(660, 655)
+$form.ClientSize = New-Object System.Drawing.Size(660, 680)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -224,26 +427,66 @@ $apiProviderComboBox.DropDownStyle = "DropDownList"
 [void]$apiProviderComboBox.Items.Add("自定义 OpenAI-compatible API")
 $form.Controls.Add($apiProviderComboBox)
 
+$serviceStatusPanel = New-Object System.Windows.Forms.Panel
+$serviceStatusPanel.Location = New-Object System.Drawing.Point(30, 239)
+$serviceStatusPanel.Size = New-Object System.Drawing.Size(600, 60)
+$serviceStatusPanel.BorderStyle = "FixedSingle"
+$serviceStatusPanel.BackColor = [System.Drawing.Color]::White
+$form.Controls.Add($serviceStatusPanel)
+
+$serviceStatusTitleLabel = New-Object System.Windows.Forms.Label
+$serviceStatusTitleLabel.Text = "套餐与模型状态"
+$serviceStatusTitleLabel.Location = New-Object System.Drawing.Point(12, 8)
+$serviceStatusTitleLabel.Size = New-Object System.Drawing.Size(118, 40)
+$serviceStatusTitleLabel.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9, [System.Drawing.FontStyle]::Bold)
+$serviceStatusTitleLabel.TextAlign = "MiddleLeft"
+$serviceStatusPanel.Controls.Add($serviceStatusTitleLabel)
+
+$serviceStatusDetailLabel = New-Object System.Windows.Forms.Label
+$serviceStatusDetailLabel.Text = "选择火山 Coding Plan 或 Codex 登录后自动查询"
+$serviceStatusDetailLabel.Location = New-Object System.Drawing.Point(134, 6)
+$serviceStatusDetailLabel.Size = New-Object System.Drawing.Size(292, 46)
+$serviceStatusDetailLabel.TextAlign = "MiddleLeft"
+$serviceStatusDetailLabel.AutoEllipsis = $true
+$serviceStatusDetailLabel.ForeColor = [System.Drawing.Color]::FromArgb(75, 85, 99)
+$serviceStatusPanel.Controls.Add($serviceStatusDetailLabel)
+
+$serviceStatusLoginButton = New-Object System.Windows.Forms.Button
+$serviceStatusLoginButton.Text = "登录"
+$serviceStatusLoginButton.Location = New-Object System.Drawing.Point(438, 14)
+$serviceStatusLoginButton.Size = New-Object System.Drawing.Size(68, 30)
+$serviceStatusLoginButton.Enabled = $false
+$serviceStatusPanel.Controls.Add($serviceStatusLoginButton)
+
+$serviceStatusRefreshButton = New-Object System.Windows.Forms.Button
+$serviceStatusRefreshButton.Text = "刷新"
+$serviceStatusRefreshButton.Location = New-Object System.Drawing.Point(514, 14)
+$serviceStatusRefreshButton.Size = New-Object System.Drawing.Size(68, 30)
+$serviceStatusRefreshButton.Enabled = $false
+$serviceStatusPanel.Controls.Add($serviceStatusRefreshButton)
+
+$serviceStatusToolTipControl = New-Object System.Windows.Forms.ToolTip
+
 $endpointLabel = New-Object System.Windows.Forms.Label
 $endpointLabel.Text = "API 地址"
-$endpointLabel.Location = New-Object System.Drawing.Point(30, 239)
+$endpointLabel.Location = New-Object System.Drawing.Point(30, 311)
 $endpointLabel.Size = New-Object System.Drawing.Size(120, 22)
 $form.Controls.Add($endpointLabel)
 
 $endpointTextBox = New-Object System.Windows.Forms.TextBox
-$endpointTextBox.Location = New-Object System.Drawing.Point(30, 264)
+$endpointTextBox.Location = New-Object System.Drawing.Point(30, 336)
 $endpointTextBox.Size = New-Object System.Drawing.Size(600, 28)
 $form.Controls.Add($endpointTextBox)
 
 $modelLabel = New-Object System.Windows.Forms.Label
 $modelLabel.Text = "模型名称"
-$modelLabel.Location = New-Object System.Drawing.Point(30, 310)
+$modelLabel.Location = New-Object System.Drawing.Point(30, 382)
 $modelLabel.Size = New-Object System.Drawing.Size(120, 22)
 $form.Controls.Add($modelLabel)
 
 $modelComboBox = New-Object System.Windows.Forms.ComboBox
-$modelComboBox.Location = New-Object System.Drawing.Point(30, 335)
-$modelComboBox.Size = New-Object System.Drawing.Size(255, 28)
+$modelComboBox.Location = New-Object System.Drawing.Point(30, 407)
+$modelComboBox.Size = New-Object System.Drawing.Size(390, 28)
 $modelComboBox.DropDownStyle = "DropDown"
 $modelComboBox.AutoCompleteMode = "SuggestAppend"
 $modelComboBox.AutoCompleteSource = "ListItems"
@@ -251,84 +494,65 @@ $form.Controls.Add($modelComboBox)
 
 $reasoningEffortLabel = New-Object System.Windows.Forms.Label
 $reasoningEffortLabel.Text = "思考程度"
-$reasoningEffortLabel.Location = New-Object System.Drawing.Point(300, 310)
+$reasoningEffortLabel.Location = New-Object System.Drawing.Point(434, 382)
 $reasoningEffortLabel.Size = New-Object System.Drawing.Size(120, 22)
 $form.Controls.Add($reasoningEffortLabel)
 
 $reasoningEffortComboBox = New-Object System.Windows.Forms.ComboBox
-$reasoningEffortComboBox.Location = New-Object System.Drawing.Point(300, 335)
-$reasoningEffortComboBox.Size = New-Object System.Drawing.Size(120, 28)
+$reasoningEffortComboBox.Location = New-Object System.Drawing.Point(434, 407)
+$reasoningEffortComboBox.Size = New-Object System.Drawing.Size(196, 28)
 $reasoningEffortComboBox.DropDownStyle = "DropDownList"
 $form.Controls.Add($reasoningEffortComboBox)
 
-$codexRefreshButton = New-Object System.Windows.Forms.Button
-$codexRefreshButton.Text = "刷新 Codex 登录和模型"
-$codexRefreshButton.Location = New-Object System.Drawing.Point(434, 334)
-$codexRefreshButton.Size = New-Object System.Drawing.Size(196, 30)
-$form.Controls.Add($codexRefreshButton)
-
 $apiKeyLabel = New-Object System.Windows.Forms.Label
 $apiKeyLabel.Text = "API Key"
-$apiKeyLabel.Location = New-Object System.Drawing.Point(30, 381)
+$apiKeyLabel.Location = New-Object System.Drawing.Point(30, 453)
 $apiKeyLabel.Size = New-Object System.Drawing.Size(120, 22)
 $form.Controls.Add($apiKeyLabel)
 
 $apiKeyAuthCheckBox = New-Object System.Windows.Forms.CheckBox
 $apiKeyAuthCheckBox.Text = "使用 API Key 认证"
-$apiKeyAuthCheckBox.Location = New-Object System.Drawing.Point(155, 379)
+$apiKeyAuthCheckBox.Location = New-Object System.Drawing.Point(155, 451)
 $apiKeyAuthCheckBox.Size = New-Object System.Drawing.Size(180, 24)
 $apiKeyAuthCheckBox.Checked = $true
 $form.Controls.Add($apiKeyAuthCheckBox)
 
 $apiKeyTextBox = New-Object System.Windows.Forms.TextBox
-$apiKeyTextBox.Location = New-Object System.Drawing.Point(30, 406)
+$apiKeyTextBox.Location = New-Object System.Drawing.Point(30, 478)
 $apiKeyTextBox.Size = New-Object System.Drawing.Size(600, 28)
 $apiKeyTextBox.UseSystemPasswordChar = $true
 $form.Controls.Add($apiKeyTextBox)
 
 $apiKeyHintLabel = New-Object System.Windows.Forms.Label
 $apiKeyHintLabel.Text = "留空将保留已有凭据；取消勾选时不发送 Key，但不会删除已保存的 Key。"
-$apiKeyHintLabel.Location = New-Object System.Drawing.Point(30, 439)
+$apiKeyHintLabel.Location = New-Object System.Drawing.Point(30, 511)
 $apiKeyHintLabel.Size = New-Object System.Drawing.Size(600, 20)
 $apiKeyHintLabel.ForeColor = [System.Drawing.Color]::FromArgb(107, 114, 128)
 $form.Controls.Add($apiKeyHintLabel)
 
-$codexLoginButton = New-Object System.Windows.Forms.Button
-$codexLoginButton.Text = "登录 Codex"
-$codexLoginButton.Location = New-Object System.Drawing.Point(30, 470)
-$codexLoginButton.Size = New-Object System.Drawing.Size(125, 32)
-$form.Controls.Add($codexLoginButton)
-
-$codexStatusLabel = New-Object System.Windows.Forms.Label
-$codexStatusLabel.Text = "Codex 登录由本机 Codex 管理，本程序不读取登录令牌。"
-$codexStatusLabel.Location = New-Object System.Drawing.Point(170, 476)
-$codexStatusLabel.Size = New-Object System.Drawing.Size(460, 22)
-$codexStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(75, 85, 99)
-$form.Controls.Add($codexStatusLabel)
-
 $codexImageCheckBox = New-Object System.Windows.Forms.CheckBox
 $codexImageCheckBox.Text = "图片生成使用 Codex 订阅（gpt-image-2，文字模型保持当前选择）"
-$codexImageCheckBox.Location = New-Object System.Drawing.Point(30, 510)
+$codexImageCheckBox.Location = New-Object System.Drawing.Point(30, 543)
 $codexImageCheckBox.Size = New-Object System.Drawing.Size(600, 24)
 $codexImageCheckBox.Checked = $false
 $form.Controls.Add($codexImageCheckBox)
 
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Text = "就绪"
-$statusLabel.Location = New-Object System.Drawing.Point(30, 545)
+$statusLabel.Location = New-Object System.Drawing.Point(30, 582)
 $statusLabel.Size = New-Object System.Drawing.Size(600, 24)
 $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(55, 65, 81)
 $form.Controls.Add($statusLabel)
 
 $saveButton = New-Object System.Windows.Forms.Button
 $saveButton.Text = "保存配置"
-$saveButton.Location = New-Object System.Drawing.Point(330, 595)
+$saveButton.Location = New-Object System.Drawing.Point(330, 622)
 $saveButton.Size = New-Object System.Drawing.Size(140, 38)
 $form.Controls.Add($saveButton)
 
 $startButton = New-Object System.Windows.Forms.Button
 $startButton.Text = "保存并重启 Accio"
-$startButton.Location = New-Object System.Drawing.Point(484, 595)
+$startButton.Location = New-Object System.Drawing.Point(484, 622)
 $startButton.Size = New-Object System.Drawing.Size(146, 38)
 $startButton.BackColor = [System.Drawing.Color]::FromArgb(37, 99, 235)
 $startButton.ForeColor = [System.Drawing.Color]::White
@@ -475,6 +699,422 @@ function Update-ApiModelOptions([string[]]$models, [string]$selectedModel) {
     $modelComboBox.Text = $selectedModel
 }
 
+function Get-VolcenginePlanDisplayName([string]$planKey) {
+    switch ($planKey) {
+        "coding-plan" { return "Coding Plan 个人版" }
+        "coding-plan-team" { return "Coding Plan 团队版" }
+        default { return $planKey }
+    }
+}
+
+function Get-VolcenginePeriodDisplayName([string]$label) {
+    switch ($label) {
+        "session" { return "会话" }
+        "5h" { return "5 小时" }
+        "daily" { return "每日" }
+        "weekly" { return "每周" }
+        "monthly" { return "每月" }
+        default { return $label }
+    }
+}
+
+function Get-VolcengineUsageDisplay($period) {
+    $percentValue = Get-JsonPropertyValue $period "percent" $null
+    $usedValue = Get-JsonPropertyValue $period "used" $null
+    $totalValue = Get-JsonPropertyValue $period "total" $null
+    if ($null -ne $usedValue -and $null -ne $totalValue) {
+        $text = "$usedValue / $totalValue"
+        if ($null -ne $percentValue) {
+            $text += "（$percentValue%）"
+        }
+        return $text
+    }
+    if ($null -ne $percentValue) {
+        return "已用 $percentValue%"
+    }
+    return "未返回额度"
+}
+
+function Set-VolcengineLiveModels([string[]]$models, [DateTime]$refreshedAt) {
+    $liveModels = @($models | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)
+    if ($liveModels.Count -eq 0) {
+        return
+    }
+    $script:volcengineLiveModels = @($liveModels)
+    $script:volcengineModels = @($liveModels)
+    $script:volcengineLiveModelsUpdatedAt = $refreshedAt.ToString("o")
+    if ($authComboBox.SelectedIndex -eq 0 -and (Get-SelectedApiProvider) -eq $volcengineProvider) {
+        $selectedModel = $modelComboBox.Text
+        Update-ApiModelOptions $script:volcengineModels $selectedModel
+    }
+}
+
+function Get-ServiceStatusMode {
+    if ($authComboBox.SelectedIndex -eq 1) {
+        return "codex"
+    }
+    if ($authComboBox.SelectedIndex -eq 0 -and (Get-SelectedApiProvider) -eq $volcengineProvider) {
+        return "volcengine"
+    }
+    return "inactive"
+}
+
+function Get-ServiceStatusColor([string]$level) {
+    switch ($level) {
+        "success" { return [System.Drawing.Color]::FromArgb(21, 128, 61) }
+        "warning" { return [System.Drawing.Color]::FromArgb(180, 83, 9) }
+        "error" { return [System.Drawing.Color]::FromArgb(185, 28, 28) }
+        "working" { return [System.Drawing.Color]::FromArgb(37, 99, 235) }
+        default { return [System.Drawing.Color]::FromArgb(75, 85, 99) }
+    }
+}
+
+function Update-ServiceStatusPanel {
+    $mode = Get-ServiceStatusMode
+    switch ($mode) {
+        "volcengine" {
+            $serviceStatusTitleLabel.Text = "火山 Coding Plan"
+            $serviceStatusDetailLabel.Text = $script:volcengineStatusText
+            $serviceStatusDetailLabel.ForeColor = Get-ServiceStatusColor $script:volcengineStatusLevel
+            $serviceStatusLoginButton.Enabled = $true
+            $serviceStatusRefreshButton.Enabled = -not $script:volcengineRefreshing
+            $serviceStatusToolTipControl.SetToolTip($serviceStatusDetailLabel, $script:volcengineStatusToolTip)
+        }
+        "codex" {
+            $serviceStatusTitleLabel.Text = "Codex ChatGPT"
+            $serviceStatusDetailLabel.Text = $script:codexStatusText
+            $serviceStatusDetailLabel.ForeColor = Get-ServiceStatusColor $script:codexStatusLevel
+            $serviceStatusLoginButton.Enabled = $true
+            $serviceStatusRefreshButton.Enabled = -not $script:codexRefreshing
+            $serviceStatusToolTipControl.SetToolTip($serviceStatusDetailLabel, $script:codexStatusToolTip)
+        }
+        default {
+            $serviceStatusTitleLabel.Text = "套餐与模型状态"
+            $serviceStatusDetailLabel.Text = "选择火山 Coding Plan 或 Codex 登录后自动查询"
+            $serviceStatusDetailLabel.ForeColor = Get-ServiceStatusColor "idle"
+            $serviceStatusLoginButton.Enabled = $false
+            $serviceStatusRefreshButton.Enabled = $false
+            $serviceStatusToolTipControl.SetToolTip($serviceStatusDetailLabel, "")
+        }
+    }
+}
+
+function Set-ServiceStatusState([string]$mode, [string]$text, [string]$level, [string]$toolTip = "") {
+    if ($mode -eq "volcengine") {
+        $script:volcengineStatusText = $text
+        $script:volcengineStatusLevel = $level
+        $script:volcengineStatusToolTip = $toolTip
+    } elseif ($mode -eq "codex") {
+        $script:codexStatusText = $text
+        $script:codexStatusLevel = $level
+        $script:codexStatusToolTip = $toolTip
+    }
+    if ((Get-ServiceStatusMode) -eq $mode) {
+        Update-ServiceStatusPanel
+    }
+}
+
+function Get-VolcengineInlineSummary($dashboard) {
+    $planSummaries = New-Object System.Collections.Generic.List[string]
+    $detailLines = New-Object System.Collections.Generic.List[string]
+    $hasUsageError = $false
+    foreach ($plan in @($dashboard.Plans)) {
+        $planKey = [string](Get-JsonPropertyValue $plan "key" "")
+        $planName = Get-VolcenginePlanDisplayName $planKey
+        $tier = [string](Get-JsonPropertyValue $plan "tier" "")
+        $planLabel = (@($planName, $tier) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join " "
+        $usageSummaries = New-Object System.Collections.Generic.List[string]
+        foreach ($usageItem in @($dashboard.UsageItems | Where-Object {
+            [string](Get-JsonPropertyValue $_ "product" "") -eq $planKey
+        })) {
+            $usageError = [string](Get-JsonPropertyValue $usageItem "error" "")
+            if (-not [string]::IsNullOrWhiteSpace($usageError)) {
+                $hasUsageError = $true
+                [void]$usageSummaries.Add("用量暂不可读")
+                [void]$detailLines.Add("$planLabel / $usageError")
+                continue
+            }
+            foreach ($period in @(Get-JsonPropertyValue $usageItem "periods" @())) {
+                $periodName = Get-VolcenginePeriodDisplayName ([string](Get-JsonPropertyValue $period "label" ""))
+                $usageText = Get-VolcengineUsageDisplay $period
+                [void]$usageSummaries.Add("$periodName $usageText")
+                $resetAt = [string](Get-JsonPropertyValue $period "reset_at" "")
+                $detail = "$planLabel / $periodName / $usageText"
+                if (-not [string]::IsNullOrWhiteSpace($resetAt)) {
+                    $detail += " / 重置 $resetAt"
+                }
+                [void]$detailLines.Add($detail)
+            }
+        }
+        $planSummary = $planLabel
+        if ($usageSummaries.Count -gt 0) {
+            $planSummary += " · " + ($usageSummaries -join " · ")
+        }
+        [void]$planSummaries.Add($planSummary)
+    }
+
+    $level = "success"
+    $firstLine = if ($planSummaries.Count -gt 0) {
+        $planSummaries -join "；"
+    } else {
+        $level = "warning"
+        "已登录，但未检测到 Coding Plan 订阅"
+    }
+    if ($hasUsageError) {
+        $level = "warning"
+    }
+    $modelCount = @($dashboard.LiveModelIds).Count
+    $secondLine = "$modelCount 个可用模型 · $($dashboard.RefreshedAt.ToString('HH:mm')) 更新"
+    $configuredModel = $modelComboBox.Text
+    if ($modelCount -gt 0 -and -not ($dashboard.LiveModelIds -contains $configuredModel)) {
+        $level = "warning"
+        $secondLine += " · 当前模型不在套餐列表"
+        [void]$detailLines.Add("当前配置模型 $configuredModel 不在套餐返回的模型列表中")
+    }
+    if (@($dashboard.Errors).Count -gt 0) {
+        $level = "warning"
+        [void]$detailLines.Add("状态查询部分失败：$($dashboard.Errors -join ' | ')")
+    }
+    [void]$detailLines.Add("官方 Ark CLI：$($dashboard.CliVersion)")
+    return [pscustomobject]@{
+        Text = "$firstLine`n$secondLine"
+        Level = $level
+        ToolTip = $detailLines -join [Environment]::NewLine
+    }
+}
+
+function Get-WorkerFunctionSource([string]$name) {
+    $command = Get-Command $name -CommandType Function -ErrorAction Stop
+    return "function $name {`n$($command.Definition)`n}`n"
+}
+
+function Refresh-VolcengineStatus {
+    if ((Get-ServiceStatusMode) -ne "volcengine" -or $script:volcengineRefreshing) {
+        return
+    }
+    $script:volcengineRefreshing = $true
+    Set-ServiceStatusState "volcengine" "正在后台读取套餐额度和可用模型..." "working"
+    try {
+        $functionSources = @(
+            "Get-JsonPropertyValue",
+            "Get-ArkCliScript",
+            "Invoke-ArkCliJson",
+            "Get-ArkCliVersion",
+            "Get-VolcengineDashboardData"
+        ) | ForEach-Object { Get-WorkerFunctionSource $_ }
+        $workerScript = @"
+Set-StrictMode -Version Latest
+`$ErrorActionPreference = "Stop"
+$($functionSources -join [Environment]::NewLine)
+Get-VolcengineDashboardData | ConvertTo-Json -Depth 12 -Compress
+"@
+        $script:volcengineRefreshPowerShell = [System.Management.Automation.PowerShell]::Create()
+        [void]$script:volcengineRefreshPowerShell.AddScript($workerScript)
+        $script:volcengineRefreshAsyncResult = $script:volcengineRefreshPowerShell.BeginInvoke()
+        $serviceStatusWorkerTimer.Start()
+    } catch {
+        if ($null -ne $script:volcengineRefreshPowerShell) {
+            $script:volcengineRefreshPowerShell.Dispose()
+        }
+        $script:volcengineRefreshPowerShell = $null
+        $script:volcengineRefreshAsyncResult = $null
+        $script:volcengineRefreshing = $false
+        Set-ServiceStatusState "volcengine" "火山状态读取失败；点击「刷新」重试" "error" $_.Exception.Message
+        Update-ServiceStatusPanel
+    }
+}
+
+function Complete-VolcengineStatusRefresh {
+    if ($null -eq $script:volcengineRefreshAsyncResult -or -not $script:volcengineRefreshAsyncResult.IsCompleted) {
+        return
+    }
+    $worker = $script:volcengineRefreshPowerShell
+    try {
+        $output = $worker.EndInvoke($script:volcengineRefreshAsyncResult)
+        if ($worker.Streams.Error.Count -gt 0) {
+            throw [string]$worker.Streams.Error[0]
+        }
+        $json = @($output | ForEach-Object { [string]$_ } | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_)
+        } | Select-Object -Last 1)
+        if ($json.Count -eq 0) {
+            throw "火山状态后台查询没有返回数据"
+        }
+        $dashboard = $json[0] | ConvertFrom-Json
+        $dashboard.RefreshedAt = [datetime]$dashboard.RefreshedAt
+        if (-not $dashboard.LoggedIn) {
+            $hint = [string](Get-JsonPropertyValue $dashboard.Auth "hint" "请点击登录")
+            Set-ServiceStatusState "volcengine" "未登录火山账号；点击「登录」完成浏览器授权" "error" "$($dashboard.CliVersion)`n$hint"
+        } else {
+            Set-VolcengineLiveModels @($dashboard.LiveModelIds) $dashboard.RefreshedAt
+            $summary = Get-VolcengineInlineSummary $dashboard
+            Set-ServiceStatusState "volcengine" $summary.Text $summary.Level $summary.ToolTip
+        }
+    } catch {
+        Set-ServiceStatusState "volcengine" "火山状态读取失败；点击「刷新」重试" "error" $_.Exception.Message
+    } finally {
+        $worker.Dispose()
+        $script:volcengineRefreshPowerShell = $null
+        $script:volcengineRefreshAsyncResult = $null
+        $script:volcengineRefreshing = $false
+        Update-ServiceStatusPanel
+    }
+}
+
+function Get-CodexPlanDisplayName([string]$planType) {
+    if ([string]::IsNullOrWhiteSpace($planType)) {
+        return "ChatGPT"
+    }
+    switch ($planType.ToLowerInvariant()) {
+        "pro" { return "ChatGPT Pro" }
+        "plus" { return "ChatGPT Plus" }
+        "team" { return "ChatGPT Team" }
+        "business" { return "ChatGPT Business" }
+        "enterprise" { return "ChatGPT Enterprise" }
+        "edu" { return "ChatGPT Edu" }
+        default { return "ChatGPT $planType" }
+    }
+}
+
+function Get-CodexWindowDisplayName($minutesValue) {
+    if ($null -eq $minutesValue) {
+        return "额度窗口"
+    }
+    $minutes = [int]$minutesValue
+    if ($minutes -gt 0 -and $minutes % 10080 -eq 0) {
+        return "$($minutes / 10080) 周"
+    }
+    if ($minutes -gt 0 -and $minutes % 1440 -eq 0) {
+        return "$($minutes / 1440) 天"
+    }
+    if ($minutes -gt 0 -and $minutes % 60 -eq 0) {
+        return "$($minutes / 60) 小时"
+    }
+    return "$minutes 分钟"
+}
+
+function Get-CodexResetDisplay($unixSeconds) {
+    if ($null -eq $unixSeconds) {
+        return ""
+    }
+    return [DateTimeOffset]::FromUnixTimeSeconds([long]$unixSeconds).ToLocalTime().ToString("MM-dd HH:mm")
+}
+
+function Get-CompactNumber($value) {
+    if ($null -eq $value) {
+        return ""
+    }
+    $number = [double]$value
+    if ($number -ge 100000000) {
+        return "{0:0.##} 亿" -f ($number / 100000000)
+    }
+    if ($number -ge 10000) {
+        return "{0:0.##} 万" -f ($number / 10000)
+    }
+    return "{0:N0}" -f $number
+}
+
+function Get-CodexStatusSummary($status) {
+    if (-not $status.authenticated) {
+        return [pscustomobject]@{
+            Text = "尚未登录 ChatGPT；点击「登录」完成 Codex 授权"
+            Level = "error"
+            ToolTip = "Codex 登录由本机 Codex 管理，本程序不读取或导出登录令牌。"
+        }
+    }
+
+    $planName = Get-CodexPlanDisplayName ([string]$status.planType)
+    $limitSummaries = New-Object System.Collections.Generic.List[string]
+    $detailLines = New-Object System.Collections.Generic.List[string]
+    foreach ($limit in @($status.rateLimits)) {
+        $limitName = [string](Get-JsonPropertyValue $limit "limitName" "")
+        if ([string]::IsNullOrWhiteSpace($limitName)) {
+            $limitName = [string](Get-JsonPropertyValue $limit "limitId" "")
+        }
+        foreach ($windowName in @("primary", "secondary")) {
+            $window = Get-JsonPropertyValue $limit $windowName $null
+            if ($null -eq $window) {
+                continue
+            }
+            $duration = Get-CodexWindowDisplayName (Get-JsonPropertyValue $window "windowDurationMins" $null)
+            $usedPercent = Get-JsonPropertyValue $window "usedPercent" $null
+            $summary = if ($null -ne $usedPercent) { "$duration 已用 $usedPercent%" } else { "$duration 用量未知" }
+            if (-not [string]::IsNullOrWhiteSpace($limitName) -and $limitName -ne "codex") {
+                $summary = "$limitName $summary"
+            }
+            [void]$limitSummaries.Add($summary)
+            $resetAt = Get-CodexResetDisplay (Get-JsonPropertyValue $window "resetsAt" $null)
+            $detail = $summary
+            if (-not [string]::IsNullOrWhiteSpace($resetAt)) {
+                $detail += " / $resetAt 重置"
+            }
+            [void]$detailLines.Add($detail)
+        }
+    }
+
+    $modelCount = @($status.models).Count
+    $firstLine = $planName
+    if ($limitSummaries.Count -gt 0) {
+        $firstLine += " · " + ($limitSummaries -join " · ")
+    }
+    $secondParts = New-Object System.Collections.Generic.List[string]
+    [void]$secondParts.Add("$modelCount 个可用模型")
+    if ($status.imageGenerationAvailable) {
+        [void]$secondParts.Add("gpt-image-2 可用")
+    }
+    $lifetimeTokens = Get-JsonPropertyValue $status.usageSummary "lifetimeTokens" $null
+    if ($null -ne $lifetimeTokens) {
+        [void]$secondParts.Add("累计 $(Get-CompactNumber $lifetimeTokens) Token")
+    }
+    [void]$secondParts.Add("$((Get-Date).ToString('HH:mm')) 更新")
+
+    $errors = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace([string]$status.rateLimitsError)) {
+        [void]$errors.Add("额度：$($status.rateLimitsError)")
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$status.usageError)) {
+        [void]$errors.Add("Token：$($status.usageError)")
+    }
+    $level = if ($errors.Count -gt 0) { "warning" } else { "success" }
+    if ($errors.Count -gt 0) {
+        [void]$secondParts.Add("部分用量暂不可读")
+        [void]$detailLines.Add(($errors -join [Environment]::NewLine))
+    }
+    return [pscustomobject]@{
+        Text = "$firstLine`n$($secondParts -join ' · ')"
+        Level = $level
+        ToolTip = $detailLines -join [Environment]::NewLine
+    }
+}
+
+function Start-CurrentServiceLogin {
+    switch (Get-ServiceStatusMode) {
+        "volcengine" {
+            $arkCliScript = Get-ArkCliScript
+            $powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+            Start-Process -FilePath $powershellExe -ArgumentList @(
+                "-NoExit",
+                "-NoProfile",
+                "-File", "`"$arkCliScript`"",
+                "auth", "login", "volc-sso"
+            )
+            Set-ServiceStatusState "volcengine" "登录窗口已打开；授权完成后点击「刷新」" "working"
+        }
+        "codex" {
+            $codexExe = Get-CodexExecutable
+            Start-Process -FilePath $codexExe -ArgumentList "login"
+            Set-ServiceStatusState "codex" "Codex 登录已启动；完成授权后点击「刷新」" "working"
+        }
+    }
+}
+
+function Refresh-CurrentServiceStatus {
+    switch (Get-ServiceStatusMode) {
+        "volcengine" { Refresh-VolcengineStatus }
+        "codex" { Refresh-CodexStatus }
+    }
+}
+
 function Get-SelectedReasoningEffort {
     if ($authComboBox.SelectedIndex -eq 0) {
         return (Get-SelectedApiReasoningEffort)
@@ -520,12 +1160,15 @@ function Show-SelectedApiProviderControls {
         $endpointTextBox.Text = $settings.Endpoint
         if ($apiProvider -eq $volcengineProvider) {
             Update-ApiModelOptions $volcengineModels $settings.Model
+            $modelLabel.Text = "模型名称（套餐自动查询）"
             $apiKeyHintLabel.Text = "留空将保留火山 Coding Plan 已有凭据；该 Key 与 OpenCode Go 完全分开保存。"
         } elseif ($apiProvider -eq $customApiProvider) {
             Update-ApiModelOptions @() $settings.Model
+            $modelLabel.Text = "模型名称"
             $apiKeyHintLabel.Text = "留空将保留自定义 API 已有凭据；取消勾选时不发送 Key。"
         } else {
             Update-ApiModelOptions $openCodeModels $settings.Model
+            $modelLabel.Text = "模型名称"
             $apiKeyHintLabel.Text = "留空将保留 OpenCode Go 已有凭据；切换火山不会覆盖这个 Key。"
         }
         $apiKeyAuthCheckBox.Checked = [bool]$settings.UseApiKey
@@ -539,6 +1182,7 @@ function Show-SelectedApiProviderControls {
     $apiKeyAuthCheckBox.Enabled = $usesApi -and $apiProvider -ne $volcengineProvider
     $apiKeyTextBox.Enabled = $usesApi -and $apiKeyAuthCheckBox.Checked
     $apiKeyLabel.Enabled = $usesApi -and $apiKeyAuthCheckBox.Checked
+    Update-ServiceStatusPanel
     $script:previousApiProviderIndex = $apiProviderComboBox.SelectedIndex
 }
 
@@ -619,10 +1263,12 @@ function Update-ModeControls {
         Show-SelectedApiProviderControls
     } elseif ($usesCodex) {
         $endpointTextBox.Text = $codexEndpoint
+        $modelLabel.Text = "模型名称（Codex 自动查询）"
         $modelComboBox.Text = $script:lastCodexModel
         Update-ReasoningEfforts $script:lastCodexReasoningEffort
     } elseif ($usesNative) {
         $endpointTextBox.Text = $nativeEndpoint
+        $modelLabel.Text = "模型名称"
         $modelComboBox.Text = $nativeModel
         Update-NativeReasoningEffort
     }
@@ -640,52 +1286,118 @@ function Update-ModeControls {
     $reasoningEffortLabel.Enabled = -not $usesNative
     $reasoningEffortComboBox.Enabled = -not $usesNative
     $codexImageCheckBox.Enabled = -not $usesNative
-    $codexRefreshButton.Enabled = $usesCodex -or $codexImageCheckBox.Checked
-    $codexLoginButton.Enabled = $usesCodex -or $codexImageCheckBox.Checked
+    Update-ServiceStatusPanel
     $script:previousAuthIndex = $authComboBox.SelectedIndex
 }
 
-function Refresh-CodexStatus {
-    $form.UseWaitCursor = $true
-    $codexRefreshButton.Enabled = $false
-    $codexStatusLabel.Text = "正在读取本机 Codex 登录和模型..."
-    $form.Refresh()
-    try {
-        $status = Get-CodexStatus
-        if ($authComboBox.SelectedIndex -eq 1) {
-            $selectedModel = $modelComboBox.Text
-            $selectedReasoningEffort = $reasoningEffortComboBox.Text
-            $script:codexModelsById.Clear()
-            $modelComboBox.BeginUpdate()
+function Apply-CodexStatus($status) {
+    if ($authComboBox.SelectedIndex -eq 1) {
+        $selectedModel = $modelComboBox.Text
+        $selectedReasoningEffort = $reasoningEffortComboBox.Text
+        $script:codexModelsById.Clear()
+        $modelComboBox.BeginUpdate()
+        try {
             $modelComboBox.Items.Clear()
             foreach ($item in $status.models) {
                 [void]$modelComboBox.Items.Add([string]$item.id)
                 $script:codexModelsById[[string]$item.id] = $item
             }
+        } finally {
             $modelComboBox.EndUpdate()
-            if (-not [string]::IsNullOrWhiteSpace($selectedModel) -and $modelComboBox.Items.Contains($selectedModel)) {
-                $modelComboBox.SelectedItem = $selectedModel
-            } else {
-                $default = $status.models | Where-Object { $_.isDefault } | Select-Object -First 1
-                if ($default) {
-                    $modelComboBox.SelectedItem = [string]$default.id
-                } elseif ($modelComboBox.Items.Count -gt 0) {
-                    $modelComboBox.SelectedIndex = 0
-                }
-            }
-            Update-ReasoningEfforts $selectedReasoningEffort
         }
-        if ($status.authenticated) {
-            $imageStatus = if ($status.imageGenerationAvailable) { "，gpt-image-2 可用" } else { "，图片生成不可用" }
-            $codexStatusLabel.Text = "已登录 ChatGPT（$($status.planType)），可用模型 $($status.models.Count) 个$imageStatus"
-            $codexStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(21, 128, 61)
+        if (-not [string]::IsNullOrWhiteSpace($selectedModel) -and $modelComboBox.Items.Contains($selectedModel)) {
+            $modelComboBox.SelectedItem = $selectedModel
         } else {
-            $codexStatusLabel.Text = "尚未登录 ChatGPT，请点击登录 Codex"
-            $codexStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(185, 28, 28)
+            $default = $status.models | Where-Object { $_.isDefault } | Select-Object -First 1
+            if ($default) {
+                $modelComboBox.SelectedItem = [string]$default.id
+            } elseif ($modelComboBox.Items.Count -gt 0) {
+                $modelComboBox.SelectedIndex = 0
+            }
+        }
+        Update-ReasoningEfforts $selectedReasoningEffort
+    }
+    $summary = Get-CodexStatusSummary $status
+    Set-ServiceStatusState "codex" $summary.Text $summary.Level $summary.ToolTip
+    if ($codexImageCheckBox.Checked -and (Get-ServiceStatusMode) -ne "codex") {
+        $statusLabel.Text = if ($status.authenticated -and $status.imageGenerationAvailable) {
+            "Codex 图片通道已登录，gpt-image-2 可用"
+        } elseif ($status.authenticated) {
+            "Codex 已登录，但图片生成当前不可用"
+        } else {
+            "Codex 图片通道尚未登录"
+        }
+        $statusLabel.ForeColor = if ($status.authenticated -and $status.imageGenerationAvailable) {
+            [System.Drawing.Color]::FromArgb(21, 128, 61)
+        } else {
+            [System.Drawing.Color]::FromArgb(180, 83, 9)
+        }
+    }
+}
+
+function Refresh-CodexStatus {
+    if ($script:codexRefreshing) {
+        return
+    }
+    $script:codexRefreshing = $true
+    Set-ServiceStatusState "codex" "正在后台读取 Codex 登录、额度和模型..." "working"
+    try {
+        $functionSources = @(
+            "Get-CodexExecutable",
+            "Get-CodexStatus"
+        ) | ForEach-Object { Get-WorkerFunctionSource $_ }
+        $workerScript = @"
+param([string]`$nodeExe, [string]`$codexStatusScript)
+Set-StrictMode -Version Latest
+`$ErrorActionPreference = "Stop"
+$($functionSources -join [Environment]::NewLine)
+Get-CodexStatus | ConvertTo-Json -Depth 12 -Compress
+"@
+        $script:codexRefreshPowerShell = [System.Management.Automation.PowerShell]::Create()
+        [void]$script:codexRefreshPowerShell.AddScript($workerScript).AddArgument($nodeExe).AddArgument($codexStatusScript)
+        $script:codexRefreshAsyncResult = $script:codexRefreshPowerShell.BeginInvoke()
+        $serviceStatusWorkerTimer.Start()
+    } catch {
+        if ($null -ne $script:codexRefreshPowerShell) {
+            $script:codexRefreshPowerShell.Dispose()
+        }
+        $script:codexRefreshPowerShell = $null
+        $script:codexRefreshAsyncResult = $null
+        $script:codexRefreshing = $false
+        Set-ServiceStatusState "codex" "Codex 状态读取失败；点击「刷新」重试" "error" $_.Exception.Message
+        Update-ServiceStatusPanel
+    }
+}
+
+function Complete-CodexStatusRefresh {
+    if ($null -eq $script:codexRefreshAsyncResult -or -not $script:codexRefreshAsyncResult.IsCompleted) {
+        return
+    }
+    $worker = $script:codexRefreshPowerShell
+    try {
+        $output = $worker.EndInvoke($script:codexRefreshAsyncResult)
+        if ($worker.Streams.Error.Count -gt 0) {
+            throw [string]$worker.Streams.Error[0]
+        }
+        $json = @($output | ForEach-Object { [string]$_ } | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_)
+        } | Select-Object -Last 1)
+        if ($json.Count -eq 0) {
+            throw "Codex 状态后台查询没有返回数据"
+        }
+        Apply-CodexStatus ($json[0] | ConvertFrom-Json)
+    } catch {
+        Set-ServiceStatusState "codex" "Codex 状态读取失败；点击「刷新」重试" "error" $_.Exception.Message
+        if ((Get-ServiceStatusMode) -ne "codex") {
+            $statusLabel.Text = "Codex 图片通道状态读取失败"
+            $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(185, 28, 28)
         }
     } finally {
-        $form.UseWaitCursor = $false
-        $codexRefreshButton.Enabled = $authComboBox.SelectedIndex -eq 1 -or $codexImageCheckBox.Checked
+        $worker.Dispose()
+        $script:codexRefreshPowerShell = $null
+        $script:codexRefreshAsyncResult = $null
+        $script:codexRefreshing = $false
+        Update-ServiceStatusPanel
     }
 }
 
@@ -753,6 +1465,8 @@ function Save-Configuration {
         volcengineEndpoint = $volcengineEndpoint
         volcengineModel = $script:lastVolcengineModel
         volcengineReasoningEffort = $script:lastVolcengineReasoningEffort
+        volcengineLiveModels = @($script:volcengineLiveModels)
+        volcengineLiveModelsUpdatedAt = $script:volcengineLiveModelsUpdatedAt
         customEndpoint = $script:lastCustomEndpoint
         customModel = $script:lastCustomModel
         customReasoningEffort = $script:lastCustomReasoningEffort
@@ -780,10 +1494,16 @@ function Show-ConfigurationError([string]$message) {
 
 $authComboBox.Add_SelectedIndexChanged({
     Update-ModeControls
+    if ($script:formShown) {
+        Refresh-CurrentServiceStatus
+    }
 })
 
 $codexImageCheckBox.Add_CheckedChanged({
     Update-ModeControls
+    if ($script:formShown -and $codexImageCheckBox.Checked -and (Get-ServiceStatusMode) -ne "codex") {
+        Refresh-CodexStatus
+    }
 })
 
 $apiProviderComboBox.Add_SelectedIndexChanged({
@@ -796,6 +1516,9 @@ $apiProviderComboBox.Add_SelectedIndexChanged({
     $script:lastApiProvider = Get-SelectedApiProvider
     $apiKeyTextBox.Clear()
     Show-SelectedApiProviderControls
+    if ($script:formShown -and (Get-ServiceStatusMode) -eq "volcengine") {
+        Refresh-VolcengineStatus
+    }
 })
 
 $apiKeyAuthCheckBox.Add_CheckedChanged({
@@ -817,20 +1540,17 @@ $modelComboBox.Add_SelectedIndexChanged({
     }
 })
 
-$codexRefreshButton.Add_Click({
+$serviceStatusRefreshButton.Add_Click({
     try {
-        Refresh-CodexStatus
+        Refresh-CurrentServiceStatus
     } catch {
         Show-ConfigurationError $_.Exception.Message
     }
 })
 
-$codexLoginButton.Add_Click({
+$serviceStatusLoginButton.Add_Click({
     try {
-        $codexExe = Get-CodexExecutable
-        Start-Process -FilePath $codexExe -ArgumentList "login"
-        $codexStatusLabel.Text = "已启动 Codex 登录；在浏览器完成后点击刷新 Codex 登录和模型"
-        $codexStatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(37, 99, 235)
+        Start-CurrentServiceLogin
     } catch {
         Show-ConfigurationError $_.Exception.Message
     }
@@ -864,7 +1584,7 @@ $startButton.Add_Click({
         $statusLabel.Text = "正在应用配置并启动 Accio..."
         $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(37, 99, 235)
         $form.Refresh()
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launcherPath -RestartBridge -RestartAccio 2>&1
+        $output = & powershell.exe -NoProfile -File $launcherPath -RestartBridge -RestartAccio 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw ($output | Out-String)
         }
@@ -932,6 +1652,18 @@ if (Test-Path -LiteralPath $configPath) {
     }
     if ($null -ne $config.PSObject.Properties["volcengineReasoningEffort"]) {
         $lastVolcengineReasoningEffort = [string]$config.volcengineReasoningEffort
+    }
+    if ($null -ne $config.PSObject.Properties["volcengineLiveModels"]) {
+        $loadedVolcengineModels = @($config.volcengineLiveModels | ForEach-Object { [string]$_ } | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_)
+        } | Sort-Object -Unique)
+        if ($loadedVolcengineModels.Count -gt 0) {
+            $volcengineLiveModels = @($loadedVolcengineModels)
+            $volcengineModels = @($loadedVolcengineModels)
+        }
+    }
+    if ($null -ne $config.PSObject.Properties["volcengineLiveModelsUpdatedAt"]) {
+        $volcengineLiveModelsUpdatedAt = [string]$config.volcengineLiveModelsUpdatedAt
     }
     if ($null -ne $config.PSObject.Properties["customEndpoint"]) {
         $lastCustomEndpoint = [string]$config.customEndpoint
@@ -1001,14 +1733,41 @@ if (Test-Path -LiteralPath $configPath) {
 }
 Update-ModeControls
 
+$serviceStatusWorkerTimer = New-Object System.Windows.Forms.Timer
+$serviceStatusWorkerTimer.Interval = 100
+$serviceStatusWorkerTimer.Add_Tick({
+    Complete-VolcengineStatusRefresh
+    Complete-CodexStatusRefresh
+    if ($null -eq $script:volcengineRefreshAsyncResult -and $null -eq $script:codexRefreshAsyncResult) {
+        $serviceStatusWorkerTimer.Stop()
+    }
+})
+
+$serviceStatusRefreshTimer = New-Object System.Windows.Forms.Timer
+$serviceStatusRefreshTimer.Interval = $arkCliRefreshIntervalMs
+$serviceStatusRefreshTimer.Add_Tick({
+    Refresh-CurrentServiceStatus
+})
+
 $form.Add_Shown({
+    $script:formShown = $true
+    $serviceStatusRefreshTimer.Start()
     if ($authComboBox.SelectedIndex -eq 1 -or $codexImageCheckBox.Checked) {
-        try {
-            Refresh-CodexStatus
-        } catch {
-            Show-ConfigurationError $_.Exception.Message
-        }
+        Refresh-CodexStatus
+    }
+    if ((Get-ServiceStatusMode) -eq "volcengine") {
+        Refresh-VolcengineStatus
     }
 })
 
 [void]$form.ShowDialog()
+$serviceStatusRefreshTimer.Stop()
+$serviceStatusRefreshTimer.Dispose()
+$serviceStatusWorkerTimer.Stop()
+$serviceStatusWorkerTimer.Dispose()
+foreach ($worker in @($script:volcengineRefreshPowerShell, $script:codexRefreshPowerShell)) {
+    if ($null -ne $worker) {
+        $worker.Stop()
+        $worker.Dispose()
+    }
+}

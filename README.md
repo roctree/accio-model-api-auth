@@ -8,6 +8,7 @@
 [![Accio](https://img.shields.io/badge/Accio-0.30.2%20verified-6C5CE7)](#验证记录)
 [![Node.js](https://img.shields.io/badge/Runtime-Node.js-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![Local](https://img.shields.io/badge/Network-127.0.0.1-2D3436)](#安全说明)
+[![Checks](https://github.com/roctree/accio-model-api-auth/actions/workflows/checks.yml/badge.svg)](https://github.com/roctree/accio-model-api-auth/actions/workflows/checks.yml)
 
 在 Accio 里使用 OpenCode Go、火山引擎 Coding Plan、自定义 OpenAI-compatible API 或本机 Codex ChatGPT 登录。图片请求还能独立走 ChatGPT 订阅中的 `gpt-image-2`。
 
@@ -25,6 +26,7 @@
 | 文字模型 | 支持 OpenCode Go、火山 Coding Plan、自定义 OpenAI-compatible API 和 Codex ChatGPT 登录 |
 | 图片模型 | 可独立启用 Codex `gpt-image-2`，文字模型不受影响 |
 | 思考模式 | 按服务商和模型显示对应档位，Codex 档位从本机 App Server 动态读取 |
+| 套餐状态 | 原配置窗口内显示火山或 Codex 的当前额度、重置时间、模型数量和刷新状态 |
 | Accio 工具 | 保留历史会话、Skill、MCP、插件、浏览器、频道和心跳能力 |
 | 模型显示 | 在 Accio 模型位置显示实际服务商、模型和思考模式 |
 | 配置切换 | 每个服务商分别保存模型、地址、思考模式和凭据 |
@@ -51,6 +53,7 @@
 - Accio Desktop
 - 安装在标准路径下的 Node.js
 - 使用 Codex 时，还需安装 Codex Desktop，或具备 `codex-code-mode-host.exe` 的完整 Codex 安装
+- 自动查询火山套餐和模型时，还需安装官方 Ark CLI：`npm install -g @volcengine/ark-cli@latest`
 
 当前代码已在 Accio Desktop `0.30.2` 上验证。其他版本可能需要重新确认内部接口。
 
@@ -59,21 +62,41 @@
 双击 [`open_config_ui.cmd`](./open_config_ui.cmd)，也可以在 PowerShell 中运行下面的命令。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_config_ui.ps1
+powershell -NoProfile -File .\accio_config_ui.ps1
 ```
+
+> [!NOTE]
+> 启动脚本尊重当前 Windows PowerShell 执行策略，不再使用 `ExecutionPolicy Bypass`，也不会自动修改系统策略。若提示“禁止运行脚本”或“未进行数字签名”，先在 Windows PowerShell 中运行 `Get-ExecutionPolicy -List` 查看原因。`Restricted` 会阻止脚本，`AllSigned` 要求签名；`RemoteSigned` 下的网络下载文件也可能被阻止。只在核实来源并审阅代码后，按 [Microsoft 执行策略说明](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1) 处理对应文件；受单位策略管理的电脑请联系管理员，不要关闭杀毒软件或添加全盘排除。
 
 ### 第二步选择认证方式
 
 1. 选择 OpenAI-compatible API、Codex ChatGPT 登录或 Accio 官方原生认证。
 2. 使用 API 时，再选择 OpenCode Go、火山 Coding Plan 或自定义服务。
-3. 按需要选择文字模型和思考模式。
-4. 需要图片能力时，勾选 Codex `gpt-image-2` 图片通道。
+3. 选择火山或 Codex 后，顶部状态框会自动查询套餐用量和可用模型。
+4. 按需要选择文字模型和思考模式。
+5. 需要图片能力时，勾选 Codex `gpt-image-2` 图片通道。
 
 ### 第三步保存并重启
 
 点击“保存并重启 Accio”。首次启用真实模型显示时必须重启一次，此后模型名称每 5 秒从本地状态刷新。
 
 图片通道成功启用后，配置界面会显示 `gpt-image-2 可用`。托盘当前模式也会显示 `生图 Codex gpt-image-2`。
+
+### 套餐与模型状态框
+
+状态框就在原配置窗口内，不会打开独立窗口。选择对应认证方式后会立即查询，并每 5 分钟自动刷新；也可以点击状态框里的“刷新”。Ark CLI 与 Codex 查询都在后台运行，不会阻塞模型切换、填写配置或窗口拖动。
+
+| 当前选择 | 状态框显示 | 模型名称下拉框 |
+| --- | --- | --- |
+| 火山 Coding Plan | 套餐档位、各周期已用比例、模型数量和刷新时间 | 从当前账号持有的 Coding Plan 实时读取 |
+| Codex ChatGPT 登录 | 订阅类型、额度窗口、重置时间、Token 统计、模型数量和图片能力 | 从本机 Codex App Server 实时读取 |
+| 其他认证方式 | 提示选择火山或 Codex 后查询 | 保持各服务商原有配置 |
+
+火山账号登录与推理 API Key 是两套独立认证。火山状态查询使用官方 Ark CLI 的 SSO 登录；模型请求仍使用单独保存在 Windows 凭据管理器中的 Coding Plan API Key。
+
+Coding Plan 当前返回套餐周期的总用量，不提供按模型拆分的消耗；界面会分别显示套餐总额度和可用模型列表，不会把两者错误关联。
+
+Codex 用量接口与模型接口分别处理。OpenAI 用量服务临时不可用或账号未返回 Token 统计时，界面会显示“部分用量暂不可读”，但登录状态、模型列表和 Accio 调用不会因此失效。
 
 ## 接入方式
 
@@ -89,7 +112,8 @@ powershell -ExecutionPolicy Bypass -File .\accio_config_ui.ps1
 ### 火山引擎 Coding Plan
 
 - 固定使用 Coding Plan 套餐专用地址
-- 支持模型预设和手动填写
+- 模型下拉框通过官方 Ark CLI 自动读取当前套餐可用模型，也允许手动填写
+- 套餐额度和模型列表每 5 分钟自动刷新
 - 每个模型只显示已经确认的思考档位
 - API Key 与 OpenCode Go、自定义 API 分开保存
 
@@ -131,10 +155,11 @@ https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions
 - 登录由本机 Codex 托管
 - 项目不读取或导出 OAuth Token
 - 模型列表从 Codex App Server 动态获取
+- 额度窗口、已用百分比、重置时间和 Token 统计从 Codex App Server 动态获取
 - 思考模式按模型实际能力显示
 - 已验证文字、多轮对话和 Accio 动态工具续轮
 
-在配置界面点击“登录 Codex”，完成登录后点击“刷新 Codex 登录和模型”。可用思考档位可能包含 `low`、`medium`、`high`、`xhigh`、`max` 和 `ultra`。
+在状态框中点击“登录”，完成授权后点击“刷新”。可用思考档位可能包含 `low`、`medium`、`high`、`xhigh`、`max` 和 `ultra`。额度读取使用 `account/rateLimits/read`，Token 统计使用 `account/usage/read`；服务端未返回的字段不会被估算或补造。
 
 ### Accio 官方原生认证
 
@@ -202,25 +227,25 @@ Codex 内置 shell、文件、Web、MCP 和子智能体工具不会桥接给 Acc
 保存当前 API 服务商的 Key。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -StoreCredential
+powershell -NoProfile -File .\accio_opencode_launcher.ps1 -StoreCredential
 ```
 
 启动本地服务与 Accio。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1
+powershell -NoProfile -File .\accio_opencode_launcher.ps1
 ```
 
 只启动本地文字桥、图片桥和路由网关。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -BackendOnly
+powershell -NoProfile -File .\accio_opencode_launcher.ps1 -BackendOnly
 ```
 
 强制重启本地桥接服务。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -BackendOnly -RestartBridge
+powershell -NoProfile -File .\accio_opencode_launcher.ps1 -BackendOnly -RestartBridge
 ```
 
 ## 配置与凭据
@@ -242,6 +267,29 @@ powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -BackendO
 | Codex OAuth | 完全交给 Codex 自己保存和刷新 |
 
 ## 验证记录
+
+### 自动化检查
+
+每次 PR 更新，以及 `main`、`feat/**`、`feature/**` 分支推送，都会触发 [Windows checks](https://github.com/roctree/accio-model-api-auth/actions/workflows/checks.yml)。测试不启动 Accio，不读取真实登录凭据，也不调用收费模型。
+
+| 检查 | 覆盖内容 |
+| --- | --- |
+| PowerShell 语法与编码 | 所有 `.ps1` 文件的 AST 解析；含中文等非 ASCII 字符的脚本必须带 UTF-8 BOM，兼容英文 Windows PowerShell 5.1 |
+| JavaScript 语法 | 已跟踪 `.js` / `.cjs` 文件的 `node --check` |
+| 配置回归测试 | 火山新旧模型字段、个人与团队套餐、空数据、失败隔离、零额度、模型与思考档位保留 |
+| Codex 状态回归测试 | 模拟 JSON-RPC、多组与旧版额度、空值、用量服务失败、未登录、进程清理 |
+| 差异检查 | 提交中的空白字符错误 |
+
+本地复现（Windows PowerShell 5.1 与 Node.js 24）：
+
+```powershell
+powershell -NoProfile -File .\tests\config-ui.tests.ps1
+node --test .\tests\codex-status.test.cjs
+```
+
+测试数据是人工构造的离线样例。CI 通过不等于真实套餐、所有 Accio 版本或杀毒软件均验证通过。工作流只使用仓库读取权限，不传入业务密钥，依赖的官方 Actions 固定到提交 SHA。
+
+### 历史本机验证
 
 | 项目 | 验证结果 |
 | --- | --- |
@@ -268,6 +316,7 @@ powershell -ExecutionPolicy Bypass -File .\accio_opencode_launcher.ps1 -BackendO
 
 ## 安全说明
 
+- 清理高风险启动参数只能减少可疑特征，不能保证不被任何杀毒软件误报；当前脚本没有商业代码签名
 - 不要把 API Key、Cookie、登录令牌或运行日志提交到仓库
 - 项目不会读取或导出 Codex、ChatGPT 或 Accio 的登录令牌
 - 本地服务只监听 `127.0.0.1`

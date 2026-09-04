@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$StoreCredential,
     [switch]$BackendOnly,
     [switch]$RestartBridge,

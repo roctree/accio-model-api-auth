@@ -1,0 +1,36 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'feat/**', 'feature/**']
+
+permissions:
+  contents: read
+
+jobs:
+  windows-checks:
+    name: Windows checks
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: PowerShell syntax and offline UI regressions
+        shell: powershell
+        run: ./tests/config-ui.tests.ps1
+      - name: JavaScript syntax
+        shell: powershell
+        run: |
+          git ls-files '*.js' '*.cjs' | ForEach-Object {
+            node --check $_
+            if ($LASTEXITCODE -ne 0) { throw "Syntax check failed: $_" }
+          }
+      - name: Offline Codex status regressions
+        run: node --test tests/codex-status.test.cjs
+      - name: Whitespace check
+        run: git show --format= --check HEAD
