@@ -112,7 +112,7 @@ Codex 用量接口与模型接口分别处理。OpenAI 用量服务临时不可�
 ### 火山引擎 Coding Plan
 
 - 固定使用 Coding Plan 套餐专用地址
-- 模型下拉框通过官方 Ark CLI 自动读取当前套餐可用模型，也允许手动填写
+- 模型框通过官方 Ark CLI 自动列出当前套餐可用模型，也可以直接输入完整模型 ID；保存后自动刷新不会覆盖手动填写的模型
 - 套餐额度和模型列表每 5 分钟自动刷新
 - 每个模型只显示已经确认的思考档位
 - API Key 与 OpenCode Go、自定义 API 分开保存
@@ -123,6 +123,8 @@ https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions
 
 > [!CAUTION]
 > 不要把地址改成普通方舟 `/api/v3`。普通地址不会消耗 Coding Plan 套餐额度，并可能产生额外 API 费用。
+
+手动模型不在套餐查询结果中时，状态框会显示提示，但不会阻止保存。是否能够调用、是否计入 Coding Plan，以及支持哪些思考档位，仍由当前账号、API Key 和火山服务端决定；未确认模型按“跟随模型默认”发送。
 
 <details>
 <summary><strong>查看火山模型思考档位</strong></summary>
