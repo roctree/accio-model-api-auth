@@ -24,11 +24,24 @@ foreach ($file in Get-ChildItem -LiteralPath $repoRoot -Filter '*.ps1' -Recurse)
 Write-Output 'PASS: PowerShell syntax and UTF-8 BOM'
 
 $uiAst = [System.Management.Automation.Language.Parser]::ParseFile($uiPath, [ref]$null, [ref]$null)
+$editableModelStyle = $uiAst.Find({ param($ast)
+    $ast -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+    $ast.Left.Extent.Text -eq '$modelComboBox.DropDownStyle' -and
+    $ast.Right.Extent.Text -eq '"DropDown"'
+}, $false)
+if ($null -eq $editableModelStyle) { throw 'The model selector must remain editable' }
+$modelTextUpdateHandler = $uiAst.Find({ param($ast)
+    $ast -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+    $ast.Expression.Extent.Text -eq '$modelComboBox' -and
+    $ast.Member.Extent.Text -eq 'Add_TextUpdate'
+}, $false)
+if ($null -eq $modelTextUpdateHandler) { throw 'Missing manual model input handler' }
 $functionNames = @(
     'Get-JsonPropertyValue', 'Get-VolcengineDashboardData', 'Get-VolcengineUsageDisplay',
     'Get-ApiProviderFromIndex', 'Get-SelectedApiProvider', 'Get-VolcengineReasoningEfforts',
     'Get-ReasoningEffortDisplayName', 'Get-ApiReasoningEffort', 'Get-SelectedApiReasoningEffort',
-    'Update-ApiReasoningEfforts', 'Update-ApiModelOptions', 'Set-VolcengineLiveModels',
+    'Update-ApiReasoningEfforts', 'Update-ApiReasoningEffortsForModelInput', 'Update-ApiModelOptions',
+    'Save-ApiProviderControls', 'Set-VolcengineLiveModels',
     'Update-ReasoningEfforts', 'Apply-CodexStatus', 'Get-CodexStatusSummary',
     'Get-CodexPlanDisplayName', 'Get-CodexWindowDisplayName', 'Get-CodexResetDisplay', 'Get-CompactNumber'
 )
@@ -146,11 +159,15 @@ $apiProviderComboBox = New-Object System.Windows.Forms.ComboBox
 $modelComboBox = New-Object System.Windows.Forms.ComboBox
 $reasoningEffortComboBox = New-Object System.Windows.Forms.ComboBox
 $codexImageCheckBox = New-Object System.Windows.Forms.CheckBox
+$endpointTextBox = New-Object System.Windows.Forms.TextBox
+$apiKeyAuthCheckBox = New-Object System.Windows.Forms.CheckBox
 $authComboBox.Items.AddRange(@('api', 'codex', 'native'))
 $apiProviderComboBox.Items.AddRange(@('opencode', 'volcengine', 'custom'))
 $script:updatingApiProvider = $false
 $script:codexModelsById = @{}
 $script:lastCodexReasoningEffort = 'high'
+$script:lastVolcengineModel = 'deepseek-v4-flash'
+$script:lastVolcengineReasoningEffort = 'max'
 function Set-ServiceStatusState { }
 $selectionHandler = $uiAst.Find({ param($ast)
     $ast -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
@@ -181,6 +198,14 @@ try {
         Set-VolcengineLiveModels @() (Get-Date)
         Assert-Equal $modelComboBox.Text 'manual-model'
     }
+    Test-Case 'Manually entered Volcengine model is saved and uses existing reasoning rules' {
+        $modelComboBox.Text = 'manual-model'
+        Update-ApiReasoningEffortsForModelInput
+        Assert-Equal (Get-SelectedApiReasoningEffort) 'default'
+        Save-ApiProviderControls $volcengineProvider
+        Assert-Equal $script:lastVolcengineModel 'manual-model'
+        Assert-Equal $script:lastVolcengineReasoningEffort 'default'
+    }
     Test-Case 'Codex refresh preserves model and reasoning selection' {
         $authComboBox.SelectedIndex = 1
         $script:codexModelsById.Clear()
@@ -195,7 +220,7 @@ try {
         Assert-Equal $reasoningEffortComboBox.Text 'high'
     }
 } finally {
-    foreach ($control in @($authComboBox, $apiProviderComboBox, $modelComboBox, $reasoningEffortComboBox, $codexImageCheckBox)) {
+    foreach ($control in @($authComboBox, $apiProviderComboBox, $modelComboBox, $reasoningEffortComboBox, $codexImageCheckBox, $endpointTextBox, $apiKeyAuthCheckBox)) {
         $control.Dispose()
     }
 }

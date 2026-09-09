@@ -481,7 +481,7 @@ $form.Controls.Add($endpointTextBox)
 $modelLabel = New-Object System.Windows.Forms.Label
 $modelLabel.Text = "模型名称"
 $modelLabel.Location = New-Object System.Drawing.Point(30, 382)
-$modelLabel.Size = New-Object System.Drawing.Size(120, 22)
+$modelLabel.Size = New-Object System.Drawing.Size(390, 22)
 $form.Controls.Add($modelLabel)
 
 $modelComboBox = New-Object System.Windows.Forms.ComboBox
@@ -1160,15 +1160,18 @@ function Show-SelectedApiProviderControls {
         $endpointTextBox.Text = $settings.Endpoint
         if ($apiProvider -eq $volcengineProvider) {
             Update-ApiModelOptions $volcengineModels $settings.Model
-            $modelLabel.Text = "模型名称（套餐自动查询）"
+            $modelLabel.Text = "模型名称（可选择，也可手动输入）"
+            $serviceStatusToolTipControl.SetToolTip($modelComboBox, "下拉列表来自当前 Coding Plan 套餐；也可以直接输入完整模型 ID。")
             $apiKeyHintLabel.Text = "留空将保留火山 Coding Plan 已有凭据；该 Key 与 OpenCode Go 完全分开保存。"
         } elseif ($apiProvider -eq $customApiProvider) {
             Update-ApiModelOptions @() $settings.Model
             $modelLabel.Text = "模型名称"
+            $serviceStatusToolTipControl.SetToolTip($modelComboBox, "直接输入服务商要求的模型 ID。")
             $apiKeyHintLabel.Text = "留空将保留自定义 API 已有凭据；取消勾选时不发送 Key。"
         } else {
             Update-ApiModelOptions $openCodeModels $settings.Model
             $modelLabel.Text = "模型名称"
+            $serviceStatusToolTipControl.SetToolTip($modelComboBox, "选择列表中的模型，或直接输入模型 ID。")
             $apiKeyHintLabel.Text = "留空将保留 OpenCode Go 已有凭据；切换火山不会覆盖这个 Key。"
         }
         $apiKeyAuthCheckBox.Checked = [bool]$settings.UseApiKey
@@ -1195,6 +1198,15 @@ function Update-NativeReasoningEffort {
     } finally {
         $reasoningEffortComboBox.EndUpdate()
     }
+}
+
+function Update-ApiReasoningEffortsForModelInput {
+    if ($script:updatingApiProvider -or
+        $authComboBox.SelectedIndex -ne 0 -or
+        (Get-SelectedApiProvider) -ne $volcengineProvider) {
+        return
+    }
+    Update-ApiReasoningEfforts (Get-SelectedApiReasoningEffort)
 }
 
 function Update-ReasoningEfforts([string]$preferredEffort = "") {
@@ -1533,11 +1545,13 @@ $apiKeyAuthCheckBox.Add_CheckedChanged({
 $modelComboBox.Add_SelectedIndexChanged({
     if ($authComboBox.SelectedIndex -eq 1) {
         Update-ReasoningEfforts
-    } elseif (-not $script:updatingApiProvider -and
-        $authComboBox.SelectedIndex -eq 0 -and
-        (Get-SelectedApiProvider) -eq $volcengineProvider) {
-        Update-ApiReasoningEfforts (Get-SelectedApiReasoningEffort)
+    } else {
+        Update-ApiReasoningEffortsForModelInput
     }
+})
+
+$modelComboBox.Add_TextUpdate({
+    Update-ApiReasoningEffortsForModelInput
 })
 
 $serviceStatusRefreshButton.Add_Click({
